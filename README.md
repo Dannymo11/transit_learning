@@ -34,7 +34,7 @@ Each script described in this section prints a line of comma-separated statistic
 
 Each also saves the best transit network as a pickled torch tensor which can be read by other scripts, in a directory called `output_routes`.  The filename will contain the run name that can be provided to each script with `+run_name=my_run_name`.  If no run name is provided, the date and time when the script was launched will be used instead.
 
-To evaluate a model on a Mumford city (as in LC-100 in our papers), use the script `learning/eval_route_generator.py`.  You must provide a `.pt` file with model weights, the path to the `Instances` sub-directory of the mumford dataset, and the name of the city on which to evaluate (`mandl` or `mumford0` - `mumford3`), as follows:
+To evaluate a model on a Mumford city, use the script `learning/eval_route_generator.py`.  You must provide a `.pt` file with model weights, the path to the `Instances` sub-directory of the mumford dataset, and the name of the city on which to evaluate (`mandl` or `mumford0` - `mumford3`), as follows:
 ```
 python learning/eval_route_generator.py +model.weights=path_to_weights.pt eval.dataset.path=/path/to/mumford/Instances +eval=mandl +run_name=my_mandl_lc100
 ```
