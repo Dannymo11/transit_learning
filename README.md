@@ -59,12 +59,6 @@ https://www.cim.mcgill.ca/~mrl/projs/transit_learning/itsc_2023
 Those used for the most up-to-date PPO experiments (forthcoming) can be downloaded from: 
 https://www.cim.mcgill.ca/~mrl/projs/transit_learning/ppo_2025
 
-# Testing commit hook
-
-If making changes to this repo, it is recommended to add the following to the [hooks] section of your .hgrc file:
-`pre-commit = pytest`
-This will ensure that all tests will be run before each commit, and the commit will be prevented if all tests do not pass.
-
 # Citation
 
 If you make use of this code for academic work, please cite our associated conference paper, "Augmenting Transit Network Design Algorithms with Deep Learning":
