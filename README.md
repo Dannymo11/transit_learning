@@ -27,7 +27,7 @@ When training is complete, the trained weights will be stored in the directory `
  
 ## Evaluation
 
-The Mumford dataset, including Mandl, can be downloaded from https://users.cs.cf.ac.uk/C.L.Mumford/Research%20Topics/UTRP/CEC2013Supp.zip.  Download the archive and extract it somewhere.
+We mainly evaluate our methods on the Mandl and Mumford datasets, which can be downloaded as a single archive from [Christine Mumford's website](https://users.cs.cf.ac.uk/C.L.Mumford/Research%20Topics/UTRP/Outline.html).  Download the archive and extract it to a directory on your system.
 
 Each script described in this section prints a line of comma-separated statistics about the best transit network it finds, with the header format:
 ,cost,C_p (minutes),C_o (minutes),d_0,d_1,d_2,d_{un},# disconnected node pairs,# stops out of bounds,running time (seconds),number of iterations
