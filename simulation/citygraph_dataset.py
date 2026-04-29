@@ -19,6 +19,7 @@ import argparse
 import pickle
 import shutil
 import random
+import sys
 from pathlib import Path
 from itertools import permutations
 import logging as log
@@ -34,6 +35,11 @@ import torch_geometric.utils as pygu
 from torch_geometric.data import Data, HeteroData, InMemoryDataset
 from torch_geometric.transforms import KNNGraph, RemoveIsolatedNodes, \
     BaseTransform, RandomRotate, RandomFlip, Compose
+
+# Allow running this file directly from the repository root.
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 import torch_utils as tu
 
@@ -120,6 +126,11 @@ def get_dynamic_training_set(min_nodes, max_nodes, space_scale, demand_scale,
     ]
     return DynamicCityGraphDataset(min_nodes, max_nodes, edge_keep_prob, 
         data_type, directed, fully_connected_demand, transforms)
+
+
+def _supports_grid_generation(n_nodes):
+    min_factor = 3
+    return any(n_nodes % ii == 0 for ii in range(min_factor, n_nodes // min_factor + 1))
 
 
 class CityGraphDataset(InMemoryDataset):
@@ -307,7 +318,9 @@ class DynamicCityGraphDataset(torch.utils.data.IterableDataset):
             return build_smallworld_graph(2, 7)
         else:
             if self.data_type == MIXED:
-                choices = [MST, IN_KNN, VORONOI, GRID4, GRID8]
+                choices = [MST, IN_KNN, VORONOI]
+                if _supports_grid_generation(n_nodes):
+                    choices.extend([GRID4, GRID8])
                 if self.directed:
                     # if the graphs are directed, out_knn differs from in_knn
                     choices.append(OUT_KNN)
@@ -321,7 +334,7 @@ class DynamicCityGraphDataset(torch.utils.data.IterableDataset):
         
 
 class InsertPosFeatures(BaseTransform):
-    def __call__(self, data):
+    def forward(self, data):
         data = data.clone()
         for key in [STOP_KEY]:
             val = data[key]
@@ -347,7 +360,7 @@ class SpaceScaleTransform(BaseTransform):
         self.min_scale = min_scale
         self.max_scale = max_scale
 
-    def __call__(self, data):
+    def forward(self, data):
         data = data.clone()
         scale_range = self.max_scale - self.min_scale
         scale = torch.rand(1) * scale_range + self.min_scale
@@ -363,7 +376,7 @@ class DemandScaleTransform(BaseTransform):
         self.min_scale = min_scale
         self.max_scale = max_scale
 
-    def __call__(self, data):
+    def forward(self, data):
         data = data.clone()
         scale_range = self.max_scale - self.min_scale
         scale = torch.rand(1) * scale_range + self.min_scale
@@ -1002,12 +1015,13 @@ def drop_nodes(graph_data, n_nodes_to_drop):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("path", help="path at which to save the data")
-    parser.add_argument("graph_type", choices=[MST, OUT_KNN, IN_KNN, VORONOI, 
+    parser.add_argument("graph_type", nargs="?", default=MIXED,
+                        choices=[MST, OUT_KNN, IN_KNN, VORONOI, 
                                                GRID4, GRID8, CIRC, SMALLWORLD, 
                                                MIXED],
                         help="type of graph to generate")
     parser.add_argument("--edgekeepprob", type=float, default=0.7)
-    parser.add_argument("-n", type=int, default=2**15,
+    parser.add_argument("-n", "--n", type=int, default=2**15,
                         help="number of graphs to generate")
     parser.add_argument("--min", type=int, default=10,
                         help="minimum graph size in nodes")
