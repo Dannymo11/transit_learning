@@ -918,7 +918,11 @@ def grid_index(
     row, col = row[mask], col[mask]
 
     edge_index = torch.stack([row, col], dim=0)
-    edge_index = pygu.coalesce(edge_index, None, height * width)
+    coalesced = pygu.coalesce(edge_index, None, height * width)
+    if isinstance(coalesced, tuple):
+        edge_index = coalesced[0]
+    else:
+        edge_index = coalesced
     return edge_index
 
 

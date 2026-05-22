@@ -33,7 +33,6 @@ import matplotlib.pyplot as plt
 import networkx as nx
 
 from learning import models
-from learning.initialization import init_from_cfg
 from simulation.transit_time_estimator import RouteGenBatchState, \
     get_cost_module_from_cfg
 from simulation.drawing import draw_coalesced_routes, plot_routes_in_groups
@@ -220,6 +219,10 @@ def rewards_to_returns(rewards, discount_rate=1):
 def test_method(method_fn, dataloader, eval_cfg, init_cfg, cost_obj, 
                 sum_writer=None, silent=False, return_routes=False, 
                 device=None, iter_num=0, *method_args, **method_kwargs):
+    # Deferred import avoids circular dependency with learning.initialization,
+    # which itself imports this module.
+    from learning.initialization import init_from_cfg
+
     if method_fn is not None:
         log.debug(f"evaluating {method_fn.__name__} on dataset")
     cost_histories = []
