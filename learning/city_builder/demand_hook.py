@@ -1,11 +1,7 @@
 """In-place demand recomputation hook for CityGraphData.
 
 After LandUseDynamics.step updates per-zone activity, the gravity model is
-re-evaluated and written back to the three places the cost module reads
-(verified in docs/M1_architecture_mapping.md sec "Critical seam properties"
-and confirmed empirically: `MyCostModule._cost_helper` pulls
-`state.demand` and `state.drive_times` fresh on every call --- no implicit
-caching to invalidate):
+re-evaluated and written back to the three places the cost module reads:
 
     1. data.demand                                 -- full N x N tensor
     2. data[DEMAND_KEY].edge_attr[:, DMD_FEAT_IDX] -- per-edge demand feature
