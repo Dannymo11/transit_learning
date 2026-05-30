@@ -33,6 +33,17 @@ def _default_accessibility(activity: Tensor, drive_times: Tensor) -> Tensor:
     return hansen_accessibility(activity, drive_times, beta=2.0)
 
 
+# Chosen M2 working value for the induced-demand strength alpha, selected by the
+# TOP-10 sensitivity sweep (Mandl, T=10, replan-every-2 years). At alpha=0.5 the
+# city shows clear evolution (~2.1x total-activity growth over 10 years, demand
+# spatially concentrating) without runaway (<half the zones reach the activity
+# cap), whereas alpha>=1.0 becomes runaway-prone (>=2/3 of zones capped). This is
+# a PLACEHOLDER default for M3 dynamic training (TOP-12); M4 calibration against
+# Bogota data replaces it with the project's headline alpha_c. Note alpha=0
+# remains the LandUseConfig default below -> static-Holliday reproduction.
+M2_WORKING_ALPHA = 0.5
+
+
 @dataclass
 class LandUseConfig:
     """Calibratable parameters for the per-zone activity update.

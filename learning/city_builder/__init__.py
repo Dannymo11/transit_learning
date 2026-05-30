@@ -16,12 +16,18 @@
 
 from .accessibility import hansen_accessibility, normalize_accessibility
 from .gravity import gravity_demand
-from .land_use_dynamics import AccessibilityFn, LandUseDynamics, LandUseConfig
+from .land_use_dynamics import (
+    AccessibilityFn,
+    LandUseDynamics,
+    LandUseConfig,
+    M2_WORKING_ALPHA,
+)
 from .demand_hook import GravityFn, recompute_demand_in_place, step_world
 
 __all__ = [
     "LandUseDynamics",
     "LandUseConfig",
+    "M2_WORKING_ALPHA",
     "AccessibilityFn",
     "hansen_accessibility",
     "normalize_accessibility",
