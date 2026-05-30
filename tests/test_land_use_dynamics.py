@@ -25,6 +25,7 @@ from learning.city_builder import (  # noqa: E402
     hansen_accessibility,
     normalize_accessibility,
     recompute_demand_in_place,
+    step_world,
 )
 from simulation.citygraph_dataset import (  # noqa: E402
     DEMAND_KEY,
@@ -357,3 +358,330 @@ def test_recompute_demand_warns_on_partial_index(small_city):
     assert any("partial" in str(w.message).lower() for w in caught), (
         f"expected partial-demand warning; got {[str(w.message) for w in caught]}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Caching-trap regression guards (from the demand-caching audit)
+#
+# These two tests do not exercise new behavior; they lock in invariants the
+# multi-year experiment silently depends on. See docs/M1_architecture_mapping.md
+# "Critical seam properties".
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def state_ready_data(small_city):
+    """A CityGraphData complete enough to build a RouteGenBatchState.
+
+    Mirrors `from_mumford_data`'s schema: pos+degree node features, a finite
+    street network, precomputed drive_times/nexts, fully-connected demand with
+    an (E, 2) edge_attr. Built from `small_city` so no data files are needed.
+    """
+    from itertools import permutations
+
+    import torch_utils as tu
+    from simulation.citygraph_dataset import (
+        STOP_KEY,
+        STREET_KEY,
+        get_node_features,
+    )
+
+    activity, drive_times = small_city
+    n = activity.shape[0]
+    od = gravity_demand(activity, drive_times, beta=2.0)
+
+    # The (finite, complete) drive-time matrix doubles as the street adjacency.
+    street_adj = drive_times.clone()
+    nexts, dts = tu.floyd_warshall(street_adj)
+    street_idx = torch.stack(
+        torch.where((street_adj > 0) & street_adj.isfinite())
+    )
+
+    data = CityGraphData()
+    data.fixed_routes = torch.zeros((0, n))
+    data[STOP_KEY].pos = torch.zeros((n, 2))
+    data[STOP_KEY].x = torch.cat(
+        (data[STOP_KEY].pos, get_node_features(street_idx, od)), dim=1
+    )
+    data[STREET_KEY].edge_index = street_idx
+    data[STREET_KEY].edge_attr = street_adj[street_idx[0], street_idx[1]]
+    data.street_adj = street_adj
+    data.drive_times = dts.squeeze(0)
+    data.nexts = nexts.squeeze(0)
+    data.demand = od.clone()
+
+    dmd_idx = torch.tensor(list(permutations(range(n), 2))).T
+    data[DEMAND_KEY].edge_index = dmd_idx
+    edge_attr = torch.zeros((dmd_idx.shape[1], 2))
+    edge_attr[:, DMD_FEAT_IDX] = od[dmd_idx[0], dmd_idx[1]]
+    edge_attr[:, SHORTESTPATH_FEAT_IDX] = data.drive_times[dmd_idx[0], dmd_idx[1]]
+    data[DEMAND_KEY].edge_attr = edge_attr
+    return data, activity, drive_times
+
+
+def test_state_does_not_alias_source_demand(state_ready_data):
+    """Risk 1: RouteGenBatchState wraps graph_data via Batch.from_data_list,
+    which COPIES tensors into new storage. A state built BEFORE an in-place
+    demand mutation therefore does NOT see the new demand.
+
+    Consequence for the experiment: the multi-year harness must REBUILD the
+    state after every recompute_demand_in_place (as smoke_drive_dynamics does);
+    a reused state would feed the cost oracle stale demand and make alpha>0
+    look like alpha=0. This test pins that contract -- if PyG ever starts
+    aliasing, it fails and we can drop the rebuild requirement deliberately
+    rather than discovering a silent bug in the results.
+    """
+    from simulation.transit_time_estimator import (
+        MyCostModule,
+        RouteGenBatchState,
+    )
+
+    data, activity, _ = state_ready_data
+    cost = MyCostModule(symmetric_routes=True)
+    state = RouteGenBatchState(
+        data, cost, n_routes_to_plan=1, min_route_len=2
+    )
+
+    # The state owns a distinct graph object, not the source.
+    assert state.graph_data is not data
+    sum_before = state.demand.sum().item()
+    assert sum_before > 0
+
+    # Mutate the SOURCE demand storage in place (strictest aliasing probe).
+    data.demand.mul_(5.0)
+
+    # The source changed...
+    assert math.isclose(
+        data.demand.sum().item(), 5.0 * sum_before, rel_tol=1e-6
+    )
+    # ...but the prebuilt state is decoupled and still holds the old demand.
+    assert math.isclose(
+        state.demand.sum().item(), sum_before, rel_tol=1e-9
+    ), (
+        "RouteGenBatchState.demand now tracks the source graph; the "
+        "rebuild-per-year contract in the multi-year harness can be revisited."
+    )
+
+
+def test_node_features_are_demand_free(small_city):
+    """Risk 2: the policy caches normalized node features at setup_planning
+    (models.set_normalized_features -> state.norm_node_features) and the demand
+    hook does NOT refresh STOP_KEY.x. That is only safe while node features
+    carry no demand.
+
+    get_node_features must stay demand-independent. If it ever re-encodes demand
+    (cf. the dormant OUT_DEMAND_FEAT_IDX / IN_DEMAND_FEAT_IDX constants and
+    DemandScaleTransform), this fails -- a signal that recompute_demand_in_place
+    must also rewrite STOP_KEY.x and bust the cached norm_node_features.
+    """
+    from simulation.citygraph_dataset import get_node_features
+
+    _, drive_times = small_city
+    street_idx = torch.stack(
+        torch.where((drive_times > 0) & drive_times.isfinite())
+    )
+    # Two very different demand matrices over the SAME street network.
+    base = torch.tensor([100.0, 50.0, 30.0, 10.0])
+    demand_a = gravity_demand(base, drive_times, beta=2.0)
+    demand_b = gravity_demand(base * 7.0 + 3.0, drive_times, beta=2.0)
+
+    feats_a = get_node_features(street_idx, demand_a)
+    feats_b = get_node_features(street_idx, demand_b)
+    assert torch.equal(feats_a, feats_b), (
+        "get_node_features now depends on demand values; extend "
+        "recompute_demand_in_place to refresh STOP_KEY.x and invalidate "
+        "norm_node_features, or the multi-year policy sees stale demand."
+    )
+
+
+# ---------------------------------------------------------------------------
+# step_world: composed dynamics + gravity recompute
+#
+# The contract is "rollouts can't skip the recompute". These tests pin:
+#   1. alpha=0 + sigma=0 keeps data.demand byte-identical across many steps
+#      (the Holliday static-demand reproduction gate, multi-step variant).
+#   2. alpha>0 actually drives data.demand to change (the dynamic-demand
+#      smoke test --- if this fails silently, alpha-sweeps are meaningless).
+#   3. step_world threads `drive_times` and `gravity_fn` through correctly,
+#      and `beta` defaults to dyn.config.beta_accessibility.
+# ---------------------------------------------------------------------------
+
+
+def test_step_world_alpha_zero_no_noise_keeps_demand_stable(fully_connected_data):
+    """alpha=0 + sigma=0 -> dynamics is identity -> demand is byte-identical
+    across an arbitrary number of step_world calls. This is the multi-step
+    extension of test_recompute_demand_with_alpha_zero_is_identity, and the
+    primary gate for the Holliday static-demand reproduction in TOP-11.
+    """
+    data, activity, drive_times = fully_connected_data
+    dyn = LandUseDynamics(
+        initial_activity=activity,
+        config=LandUseConfig(alpha=0.0, base_rate=1.0, sigma_eps=0.0),
+        seed=0,
+    )
+    # Seed demand from the gravity model so the comparison starts at the same
+    # surface the seam will recompute back to.
+    recompute_demand_in_place(data, activity, beta=2.0)
+    demand_t0 = data.demand.clone()
+    edge_attr_t0 = data[DEMAND_KEY].edge_attr.clone()
+
+    x = activity.clone()
+    for _ in range(5):
+        x, _, demand_t = step_world(dyn, data, x)
+        assert torch.equal(x, activity), "alpha=0 + sigma=0 must be identity"
+        assert torch.allclose(demand_t, demand_t0), (
+            "alpha=0 path drifted demand --- the static-demand mode is broken"
+        )
+        assert torch.allclose(data.demand, demand_t0)
+        assert torch.allclose(data[DEMAND_KEY].edge_attr, edge_attr_t0)
+
+
+def test_step_world_alpha_positive_changes_demand(fully_connected_data):
+    """alpha>0 makes well-connected zones grow, which the gravity model picks
+    up. data.demand must strictly differ from the previous year's; otherwise
+    we have a silent stale-demand bug."""
+    data, activity, drive_times = fully_connected_data
+    dyn = LandUseDynamics(
+        initial_activity=activity,
+        config=LandUseConfig(alpha=0.5, base_rate=1.0, sigma_eps=0.0),
+        seed=0,
+    )
+    recompute_demand_in_place(data, activity, beta=2.0)
+    demand_before = data.demand.clone()
+
+    x_next, _, demand_after = step_world(dyn, data, activity.clone())
+
+    # Activity moved -> demand must move.
+    assert not torch.equal(x_next, activity)
+    assert not torch.allclose(demand_after, demand_before)
+    # And the in-place write actually landed.
+    assert torch.allclose(data.demand, demand_after)
+    # Edge-attr feature mirrors the matrix on the same edge_index.
+    edge_index = data[DEMAND_KEY].edge_index
+    assert torch.allclose(
+        data[DEMAND_KEY].edge_attr[:, DMD_FEAT_IDX],
+        demand_after[edge_index[0], edge_index[1]],
+    )
+
+
+def test_step_world_matches_manual_two_step(fully_connected_data):
+    """step_world must produce byte-identical results to the explicit
+    dyn.step + recompute_demand_in_place pair --- it is sugar, not new
+    semantics. Locks in the contract so future refactors of either piece
+    cannot quietly diverge the composed path."""
+    data, activity, drive_times = fully_connected_data
+
+    # Manual path on a copy of `data`.
+    import copy
+    data_manual = copy.deepcopy(data)
+    dyn_manual = LandUseDynamics(
+        initial_activity=activity,
+        config=LandUseConfig(alpha=0.4, base_rate=1.0, sigma_eps=0.1),
+        seed=7,
+    )
+    x_manual, a_manual = dyn_manual.step(activity, drive_times)
+    demand_manual = recompute_demand_in_place(data_manual, x_manual, beta=2.0)
+
+    # Composed path on the original `data`. Same seed -> same noise.
+    dyn_world = LandUseDynamics(
+        initial_activity=activity,
+        config=LandUseConfig(alpha=0.4, base_rate=1.0, sigma_eps=0.1),
+        seed=7,
+    )
+    x_world, a_world, demand_world = step_world(dyn_world, data, activity)
+
+    assert torch.equal(x_manual, x_world)
+    assert torch.equal(a_manual, a_world)
+    assert torch.allclose(demand_manual, demand_world)
+
+
+def test_step_world_uses_drive_times_override(fully_connected_data):
+    """drive_times override must flow into BOTH the dynamics step (changes
+    A_tilde) and the gravity recompute (changes demand). The whole point of
+    the override is to evaluate dynamics against a post-action network that
+    hasn't been written into `data` yet."""
+    data, activity, drive_times = fully_connected_data
+    dyn = LandUseDynamics(
+        initial_activity=activity,
+        config=LandUseConfig(alpha=0.5, base_rate=1.0, sigma_eps=0.0),
+        seed=0,
+    )
+    # A perturbed drive-time matrix: halve every off-diagonal cost.
+    dt_fast = drive_times.clone()
+    mask = ~torch.eye(dt_fast.shape[0], dtype=torch.bool)
+    dt_fast[mask] = dt_fast[mask] * 0.5
+
+    _, _, demand_default = step_world(dyn, data, activity.clone())
+    # Reset state for a fair second call.
+    recompute_demand_in_place(data, activity, beta=2.0)
+    dyn2 = LandUseDynamics(
+        initial_activity=activity,
+        config=LandUseConfig(alpha=0.5, base_rate=1.0, sigma_eps=0.0),
+        seed=0,
+    )
+    _, _, demand_fast = step_world(dyn2, data, activity.clone(), drive_times=dt_fast)
+
+    # Faster network -> different accessibility -> different x_next ->
+    # different demand. Asserts the override was actually threaded through.
+    assert not torch.allclose(demand_default, demand_fast)
+
+
+def test_step_world_uses_gravity_fn_hook(fully_connected_data):
+    """gravity_fn override must replace the default gravity model. Tests the
+    M4-calibration seam without committing to a particular variant."""
+    data, activity, drive_times = fully_connected_data
+    dyn = LandUseDynamics(
+        initial_activity=activity,
+        config=LandUseConfig(alpha=0.3, base_rate=1.0, sigma_eps=0.0),
+        seed=0,
+    )
+
+    sentinel = torch.full(
+        (activity.shape[0], activity.shape[0]), 42.0
+    )
+    sentinel.fill_diagonal_(0.0)
+
+    def constant_gravity(x: torch.Tensor, dt: torch.Tensor) -> torch.Tensor:
+        # Ignores both inputs --- proves the hook is what's being called.
+        return sentinel.clone()
+
+    _, _, demand = step_world(
+        dyn, data, activity.clone(), gravity_fn=constant_gravity
+    )
+    assert torch.allclose(demand, sentinel)
+    assert torch.allclose(data.demand, sentinel)
+
+
+def test_step_world_default_beta_pairs_with_accessibility(fully_connected_data):
+    """When `beta` is not supplied, step_world uses dyn.config.beta_accessibility
+    so the accessibility and gravity exponents stay paired (MDP doc sec 9
+    rationale). Sanity: changing beta_accessibility changes the demand."""
+    data, activity, drive_times = fully_connected_data
+
+    dyn_b2 = LandUseDynamics(
+        initial_activity=activity,
+        config=LandUseConfig(
+            alpha=0.0, base_rate=1.0, sigma_eps=0.0, beta_accessibility=2.0,
+        ),
+        seed=0,
+    )
+    dyn_b1 = LandUseDynamics(
+        initial_activity=activity,
+        config=LandUseConfig(
+            alpha=0.0, base_rate=1.0, sigma_eps=0.0, beta_accessibility=1.0,
+        ),
+        seed=0,
+    )
+
+    import copy
+    data_b2 = copy.deepcopy(data)
+    data_b1 = copy.deepcopy(data)
+    _, _, demand_b2 = step_world(dyn_b2, data_b2, activity.clone())
+    _, _, demand_b1 = step_world(dyn_b1, data_b1, activity.clone())
+
+    # alpha=0 means activity is unchanged; the only difference is gravity beta.
+    expected_b2 = gravity_demand(activity, drive_times, beta=2.0)
+    expected_b1 = gravity_demand(activity, drive_times, beta=1.0)
+    assert torch.allclose(demand_b2, expected_b2)
+    assert torch.allclose(demand_b1, expected_b1)
+    assert not torch.allclose(demand_b2, demand_b1)

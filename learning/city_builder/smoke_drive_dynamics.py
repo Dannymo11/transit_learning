@@ -38,6 +38,7 @@ from learning.city_builder import (
     LandUseConfig,
     LandUseDynamics,
     recompute_demand_in_place,
+    step_world,
 )
 
 
@@ -139,8 +140,9 @@ def main(argv: list[str] | None = None) -> None:
               f"{cost.item():10.4f}")
         if t == args.horizon:
             break
-        x, _ = dyn.step(x, data.drive_times)
-        recompute_demand_in_place(data, x, beta=2.0)
+        # Canonical one-call wiring: dynamics step + gravity recompute fused.
+        # Equivalent to `dyn.step` + `recompute_demand_in_place`.
+        x, _, _ = step_world(dyn, data, x)
     print()
 
 
