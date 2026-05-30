@@ -170,7 +170,10 @@ def john_init(state: RouteGenBatchState, alpha=None,
 
             # build a networkx graph
             edge_costs[state.street_adj[0].isinf()] = 0
-            graph = nx.from_numpy_matrix(edge_costs.numpy())
+            # networkx >=3.0 renamed from_numpy_matrix -> from_numpy_array
+            # (drop-in: same 'weight'-attributed graph). Stack-upgrade compat,
+            # same class as the earlier Mandl-reproduction unblock.
+            graph = nx.from_numpy_array(edge_costs.numpy())
 
             # add the existing routes to the graph to get the transit times
             state.add_new_routes([network])
