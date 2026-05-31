@@ -200,34 +200,126 @@ def _route_list_from_network(net: torch.Tensor) -> Action:
     return None
 
 
-def greedy_policy(env: "CityBuilderEnv") -> Action:
-    """One demand-aware route per year: the street shortest path between the
-    current highest-demand OD pair.
+# How many high-unserved-demand seed pairs to turn into candidate routes/year.
+GREEDY_N_CANDIDATES = 12
 
-    (john_init is unusable here — it's a whole-network constructor that requires
-    a single route to cover all nodes, which fails for n_routes_to_plan=1.) As
-    induced demand concentrates activity, the top OD pair shifts, so this greedy
-    adapts year to year — and under the closed loop it reinforces the corridors
-    it builds, which is exactly the induced-demand behavior we want to baseline."""
+
+def _unserved_demand(env: "CityBuilderEnv") -> torch.Tensor:
+    """(N, N) demand weighted by how poorly each OD pair is currently served.
+
+    served quality q[i,j] = street_time / transit_time in [0,1] (1 if transit
+    matches street, ->0 as transit slows or the pair is disconnected). unserved
+    = demand * (1 - q): full demand for disconnected pairs, ~0 for well-served."""
     data = env.data
     n = int(data.demand.shape[0])
-    street_adj = _new_state(data, env.cost_obj).street_adj[0]
+    net = env._materialize_network()
+    transit = (transit_drive_times(data, env.cost_obj, net)
+               if net is not None else torch.full((n, n), float("inf")))
+    with torch.no_grad():
+        quality = torch.nan_to_num(data.drive_times / transit,
+                                   nan=0.0, posinf=0.0, neginf=0.0).clamp(0.0, 1.0)
+    unserved = data.demand * (1.0 - quality)
+    unserved.fill_diagonal_(0.0)
+    return unserved
+
+
+def _street_graph(env: "CityBuilderEnv"):
+    street_adj = _new_state(env.data, env.cost_obj).street_adj[0]
     have = (street_adj > 0) & street_adj.isfinite()
+    n = have.shape[0]
     g = nx.Graph()
     g.add_nodes_from(range(n))
     ii, jj = torch.nonzero(torch.triu(have, diagonal=1), as_tuple=True)
     for i, j in zip(ii.tolist(), jj.tolist()):
         g.add_edge(i, j, weight=float(street_adj[i, j]))
-    d = data.demand.clone()
-    d.fill_diagonal_(float("-inf"))
-    flat = int(torch.argmax(d).item())
-    src, dst = divmod(flat, n)
+    return g, have
+
+
+def _coverage_route(g, have: torch.Tensor, src: int, dst: int,
+                    node_unserved: torch.Tensor) -> Optional[list]:
+    """Shortest src->dst street path, then greedily extended (at either end) to
+    MAX_ROUTE_LEN by appending the reachable node with the most unserved demand.
+    This turns a 2-node corridor into a coverage route through high-demand zones."""
     try:
         path = nx.shortest_path(g, src, dst, weight="weight")
     except nx.NetworkXException:
         return None
-    path = path[:MAX_ROUTE_LEN]
-    return [int(node) for node in path] if len(path) >= MIN_ROUTE_LEN else None
+    if len(path) > MAX_ROUTE_LEN:
+        path = path[:MAX_ROUTE_LEN]
+    on = set(path)
+    while len(path) < MAX_ROUTE_LEN:
+        best, best_score, best_end = None, -1.0, None
+        for end in (path[0], path[-1]):
+            nbrs = torch.nonzero(have[end]).squeeze(-1).tolist()
+            for k in nbrs:
+                if k in on:
+                    continue
+                s = float(node_unserved[k])
+                if s > best_score:
+                    best, best_score, best_end = k, s, end
+        if best is None:
+            break
+        if best_end == path[0]:
+            path.insert(0, best)
+        else:
+            path.append(best)
+        on.add(best)
+    return path if len(path) >= MIN_ROUTE_LEN else None
+
+
+def greedy_policy(env: "CityBuilderEnv") -> Action:
+    """Strong myopic greedy: each year add the single route that most reduces
+    CURRENT-demand cost (judged by MyCostModule), among coverage routes seeded
+    from the highest-unserved-demand OD pairs.
+
+    This is the demand-greedy spirit of Holliday's john_init (John et al. 2014:
+    maximize served demand for the given demand matrix) made incremental and
+    robust: it respects the same one-route-per-year build-out as the RL agent,
+    uses the real cost objective as the judge, and is deliberately MYOPIC — it
+    optimizes for today's demand and does not anticipate induced growth. That
+    myopia is exactly the gap an anticipating RL policy should beat."""
+    data = env.data
+    n = int(data.demand.shape[0])
+    unserved = _unserved_demand(env)
+    if float(unserved.max()) <= 0:        # everything already well served
+        return None
+    node_unserved = unserved.sum(dim=1)   # per-node poorly-served demand
+
+    g, have = _street_graph(env)
+
+    # Candidate seed pairs = top-K unserved OD pairs.
+    k = min(GREEDY_N_CANDIDATES, n * n)
+    flat_idx = torch.topk(unserved.flatten(), k).indices.tolist()
+    seen, candidates = set(), []
+    for flat in flat_idx:
+        src, dst = divmod(int(flat), n)
+        route = _coverage_route(g, have, src, dst, node_unserved)
+        if route is None:
+            continue
+        key = tuple(sorted(route))
+        if key in seen:
+            continue
+        seen.add(key)
+        candidates.append(route)
+    if not candidates:
+        return None
+
+    # Score each candidate by the marginal cost reduction it yields on the
+    # CURRENT demand, given the already-built network. Pick the best.
+    base_cost = env._welfare_cost()
+    best_route, best_cost = None, base_cost
+    for route in candidates:
+        trial = env.built_routes + [route]
+        net = get_batch_tensor_from_routes([trial], max_route_len=MAX_ROUTE_LEN)
+        state = RouteGenBatchState(
+            env.data, env.cost_obj, n_routes_to_plan=max(len(trial), 1),
+            min_route_len=MIN_ROUTE_LEN, max_route_len=MAX_ROUTE_LEN)
+        state.add_new_routes(net)
+        with torch.no_grad():
+            c = float(env.cost_obj(state).cost.item())
+        if c < best_cost - 1e-9:
+            best_route, best_cost = route, c
+    return best_route
 
 
 def make_random_policy(seed: int = 0) -> Policy:
