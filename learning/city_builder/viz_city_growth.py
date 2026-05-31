@@ -51,7 +51,7 @@ from learning.city_builder.alpha_sweep import (
     N_ROUTES, MIN_ROUTE_LEN, MAX_ROUTE_LEN, HORIZON, REPLAN_EVERY,
     BETA_GRAVITY, CAP_MULTIPLIER,
     _fresh_data, _new_state, _initial_activity_from_od,
-    _greedy_network, _random_network,
+    _greedy_network, _random_network, transit_drive_times,
 )
 
 
@@ -106,15 +106,18 @@ def record_rollout(alpha, seed, baseline, instances_dir, instance,
 
     x = x_0.clone()
     network = None
+    acc_dt = None  # transit-OD-time matrix in force this year (closes the loop)
     activity, networks = [], []
     for t in range(horizon + 1):
         if t % replan_every == 0:
             network = _network_for_year(baseline, data, cost_obj, rand_gen)
+            acc_dt = transit_drive_times(data, cost_obj, network)
         activity.append(x.detach().cpu().numpy().copy())
         networks.append(_routes_from_network(network))
         if t == horizon:
             break
-        x, _, _ = step_world(dyn, data, x)
+        # Loop closed: growth follows TRANSIT accessibility from the network.
+        x, _, _ = step_world(dyn, data, x, accessibility_drive_times=acc_dt)
 
     return {
         "node_locs": node_locs,

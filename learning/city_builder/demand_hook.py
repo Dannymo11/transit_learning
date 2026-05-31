@@ -118,6 +118,7 @@ def step_world(
     data: CityGraphData,
     activity: Tensor,
     drive_times: Optional[Tensor] = None,
+    accessibility_drive_times: Optional[Tensor] = None,
     beta: Optional[float] = None,
     gravity_fn: Optional[GravityFn] = None,
 ) -> tuple[Tensor, Tensor, Tensor]:
@@ -138,8 +139,17 @@ def step_world(
         dyn: per-episode ``LandUseDynamics`` instance.
         data: ``CityGraphData`` to mutate in place.
         activity: current x_t, shape ``(N,)``.
-        drive_times: optional override for both the dynamics step and the
-            gravity recompute
+        drive_times: optional override used for the gravity demand recompute
+            (and, by default, the dynamics step too). Defaults to
+            ``data.drive_times`` (the street baseline).
+        accessibility_drive_times: optional SEPARATE time matrix for the
+            land-use dynamics step only. This is how the induced-demand loop is
+            closed: pass the TRANSIT OD times (derived from the agent's built
+            network) here so land-use growth follows transit accessibility,
+            while gravity demand stays on the street baseline (so unserved
+            pairs still carry latent demand the agent is rewarded for
+            capturing). Defaults to ``drive_times`` -> open-loop behavior,
+            backward compatible with the static-reproduction tests.
         beta: gravity decay exponent. Defaults to
             ``dyn.config.beta_accessibility`` so accessibility and gravity stay
             paired (per the MDP doc rationale).q
@@ -153,13 +163,17 @@ def step_world(
     """
     if drive_times is None:
         drive_times = data.drive_times
+    # Accessibility (land-use growth) may run on a different time matrix than
+    # gravity demand. Default to the gravity matrix -> open-loop behavior.
+    if accessibility_drive_times is None:
+        accessibility_drive_times = drive_times
     if beta is None:
         # Keep accessibility-beta and gravity-beta paired by default (MDP doc
         # sec 9 rationale: shared exponent is intentional, not a coincidence).
         # Override `beta` (or supply `gravity_fn`) to decouple them.
         beta = dyn.config.beta_accessibility
 
-    x_next, a_tilde = dyn.step(activity, drive_times)
+    x_next, a_tilde = dyn.step(activity, accessibility_drive_times)
     demand = recompute_demand_in_place(
         data,
         x_next,

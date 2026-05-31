@@ -1,0 +1,56 @@
+# PPO training config for Mandl (15 nodes). Mirrors ppo_mumford3.yaml with
+# Mumford-1981 benchmark route parameters for Mandl (n_routes=6, min_len=2,
+# max_len=8) lifted from cfg/eval/mandl.yaml so train-eval are consistent.
+#
+# Used by TOP-11 (M3 — Holliday static-α=0 reproduction calibration). The
+# entry point is unmodified Holliday: `learning/inductive_route_learning.py`.
+# This config does NOT pull in `learning/city_builder/` 
+#
+# Run locally:
+#   python learning/inductive_route_learning.py --config-name=ppo_mandl \
+#       +run_name=mandl_seed0 experiment.seed=0
+#
+# Seed sweep (parallels scripts/train_over_seeds.sh):
+#   for s in 0 1 2 3 4; do
+#     python learning/inductive_route_learning.py --config-name=ppo_mandl \
+#       +run_name=mandl_seed$s experiment.seed=$s
+#   done
+
+ppo:
+  n_iterations: 500    # same budget as Mumford3 default; Mandl iters are far cheaper
+  val_period: 10
+  n_epochs: 1
+  minibatch_size: 16
+  horizon: 200         # smaller than Mumford3's 400 — Mandl rollouts are shorter
+  epsilon: 0.2
+  use_gae: true
+  gae_lambda: 0.95
+
+discount_rate: 0.95
+diff_reward: true
+baseline_lr: 0.0005
+entropy_weight: 0.0
+batch_size: 16
+reward_scale: 1.0
+# lr / decay: hyperparams optuna-tuned by Holliday on Mumford3. We carry them
+# over unchanged for the calibration run; if Mandl convergence misbehaves we
+# can re-tune in a follow-up (M3 milestone allows hyperparam adjustments
+# "within reasonable bounds" — see Linear M3 description).
+lr: 0.0016134816080499328
+decay: 0.0008404361781997002
+optimizer: Adam
+
+eval:
+  min_route_len: 2
+  max_route_len: 8
+  n_routes: 6
+
+dataset:
+  type: mumford
+  path: datasets/mumford_dataset/Instances
+  city: Mandl
+
+defaults:
+  - experiment: standard
+  - model: bestsofar_feb2023
+  - _self_

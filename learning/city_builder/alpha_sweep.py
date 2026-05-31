@@ -158,6 +158,35 @@ def _evaluate(data: CityGraphData, cost_obj: MyCostModule,
     return float(out.cost.item())
 
 
+def transit_drive_times(data: CityGraphData, cost_obj: MyCostModule,
+                        network: torch.Tensor) -> torch.Tensor:
+    """OD travel-time matrix (N, N) experienced ON `network`.
+
+    This is the basis that closes the induced-demand loop: land-use growth is
+    driven by TRANSIT accessibility, so the agent's network actually reshapes
+    where the city grows. `state.transit_times` is Floyd-Warshall over the route
+    graph plus transfer penalties, and is +inf for transit-unconnected pairs
+    (Hansen accessibility maps inf -> 0 contribution, so unserved zones simply
+    receive no induced growth).
+
+    NB: on Holliday's uniform-speed model transit_times >= the street shortest
+    path, so this is intentionally NOT min(street, transit) (that would collapse
+    to street and give no learning signal). A modal speed advantage (M4 metro
+    params) is what would later make min(street, transit) meaningful."""
+    # Size the state to the network's actual route count. _new_state fixes
+    # n_routes_to_plan=N_ROUTES (6), but the multi-year env accumulates one route
+    # per year, so a network can have >6 routes; too small an n_routes_to_plan
+    # makes the cost module's stop-bookkeeping go out of bounds.
+    n_routes = int(network.shape[1])
+    state = RouteGenBatchState(
+        data, cost_obj, n_routes_to_plan=max(n_routes, 1),
+        min_route_len=MIN_ROUTE_LEN, max_route_len=MAX_ROUTE_LEN,
+    )
+    state.add_new_routes(network)
+    tt = state.transit_times
+    return tt[0] if tt.dim() == 3 else tt
+
+
 @dataclass
 class RolloutResult:
     alpha: float
@@ -192,6 +221,7 @@ def run_rollout(alpha: float, seed: int, baseline: str,
 
     x = x_0.clone()
     network = None
+    acc_dt = None  # transit-OD-time matrix in force this year (closes the loop)
     per_cost, per_sum, per_cap = [], [], []
     for t in range(horizon + 1):
         if t % replan_every == 0:
@@ -201,12 +231,17 @@ def run_rollout(alpha: float, seed: int, baseline: str,
                 network = _random_network(data, cost_obj, rand_gen)
             else:
                 raise ValueError(baseline)
+            # Recompute the transit accessibility basis whenever the network
+            # changes. This is what makes the agent's network drive growth.
+            acc_dt = transit_drive_times(data, cost_obj, network)
         per_cost.append(_evaluate(data, cost_obj, network))
         per_sum.append(float(x.sum().item()))
         per_cap.append(float((x >= cap - 1e-6).float().mean().item()))
         if t == horizon:
             break
-        x, _, _ = step_world(dyn, data, x)
+        # Loop closed: land-use growth uses TRANSIT accessibility (acc_dt);
+        # gravity demand stays on the street baseline (data.drive_times).
+        x, _, _ = step_world(dyn, data, x, accessibility_drive_times=acc_dt)
 
     return RolloutResult(
         alpha=alpha, seed=seed, baseline=baseline,

@@ -1,0 +1,49 @@
+# Gate-eval config for TOP-11 (Holliday static-alpha=0 reproduction), Mandl.
+#
+# Evaluates a single trained checkpoint. The cost-weight alpha (Holliday's
+# passenger/operator tradeoff = w_p) is set PER-ALPHA at runtime by
+# learning/city_builder/eval_gate.py, which forces variable_weights=False and
+# calls cost_obj.set_weights(...) for each alpha in {0, 0.5, 1}. The
+# cost_function pulled in via `experiment: standard` (-> mine.yaml) is therefore
+# just a carrier; its variable_weights/pp_fraction/op_fraction are overridden.
+#
+# Induced-demand alpha (our LandUseDynamics) is ZERO here: this config does not
+# import learning/city_builder dynamics at all. Pure Holliday eval surface.
+#
+# Run (locally):
+#   python -m learning.city_builder.eval_gate \
+#       --config-name=eval_gate_mandl \
+#       model.weights=inductive_gae_seed0.pt +run_name=mandl_seed0
+#
+# n_samples=100 matches the paper's LC-100 "best of 100 samples" methodology.
+
+n_samples: 100
+batch_size: 128
+sample_batch_size: 100
+
+# Where eval_gate.py writes the per-seed results JSON. Override on Modal to a
+# volume path, e.g. gate_out=/checkpoints/gate
+gate_out: results/gate
+
+eval:
+  csv: false          # test_method reads eval_cfg.csv; false => normal-format print
+  n_routes: 6
+  min_route_len: 2
+  max_route_len: 8
+  dataset:
+    type: mumford
+    path: datasets/mumford_dataset/Instances
+    city: Mandl
+
+model:
+  # REQUIRED override: path to the trained checkpoint (the run_name.pt the
+  # trainer saves at inductive_route_learning.py:820).
+  weights: ???
+
+experiment:
+  logdir: null
+
+defaults:
+  - experiment: standard
+  - model: bestsofar_feb2023
+  - _self_
