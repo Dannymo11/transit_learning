@@ -26,7 +26,7 @@ where
 - **x_t ∈ R_+^N** — per-zone activity (combined population + employment, single quantity). Initialized to x_0 from M4-calibrated Bogotá 2020 estimates (TOP-14). Evolves under `LandUseDynamics` (§4).
 - **B_t ∈ R_+** — remaining annual construction budget for the year-t decision. Reset to a fixed annual budget `B_annual` at the start of each year (default ≈ 700M USD/yr per M4 / TOP-17, calibrated to actual Line 1 build pace). Unspent budget does *not* roll forward in the base formulation (a rollover variant is a stretch ablation in M6 / TOP-26).
 
-Concretely in code: `CityBuilderState` (forthcoming `learning/city_builder/multi_year_mdp.py`) owns `(CityGraphData, activity: Tensor[N], year: int, B_remaining: float)` and materializes a per-year `RouteGenBatchState` (Holliday's inductive state, kept intact per [M1 architecture mapping](M1_architecture_mapping.md)) for the inner route-construction episode.
+Concretely in code: `CityBuilderState` (forthcoming `learning/city_builder/.py`) owns `(CityGraphData, activity: Tensor[N], year: int, B_remaining: float)` and materializes a per-year `RouteGenBatchState` (Holliday's inductive state, kept intact per [M1 architecture mapping](M1_architecture_mapping.md)) for the inner route-construction episode.
 
 ## 2. Action
 
