@@ -252,8 +252,130 @@ def train(
 
 
 # ---------------------------------------------------------------------------
+# TOP-12 dynamic-environment RL training (City Builder, GPU)
+# ---------------------------------------------------------------------------
+
+
+@app.function(
+    image=image,
+    gpu=GPU_SPEC,  # GPU by default (RL training is the expensive job)
+    secrets=[wandb_secret],
+    volumes={CHECKPOINT_MOUNT: checkpoint_volume},
+    timeout=60 * 60 * 6,
+)
+def train_rl(
+    config_name: str = "ppo_citybuilder_mandl",
+    seed: int = 0,
+    wandb_project: str = "cs224r-city-builder",
+    wandb_run_group: Optional[str] = None,
+) -> dict:
+    """Run learning/city_builder/train_rl.py (PPO under the closed induced-demand
+    loop) for one seed, with W&B logging + checkpoint persistence to the volume.
+    Mirrors `train`; the trainer saves `citybuilder_{run_name}.pt`."""
+    import wandb
+
+    sys.path.insert(0, "/workspace")
+    os.chdir("/workspace")
+    run_name = f"{config_name}_seed{seed}"
+    tb_logdir = Path(CHECKPOINT_MOUNT) / "tb_logs"
+    tb_logdir.mkdir(parents=True, exist_ok=True)
+    weights_dir = Path(CHECKPOINT_MOUNT) / "weights"
+    weights_dir.mkdir(parents=True, exist_ok=True)
+
+    wandb.tensorboard.patch(root_logdir=str(tb_logdir), pytorch=True)
+    wandb.init(project=wandb_project, name=run_name,
+               group=wandb_run_group or f"{config_name}_rl",
+               config={"config_name": config_name, "seed": seed,
+                       "milestone": "M3-TOP-12"},
+               sync_tensorboard=True, reinit=True)
+
+    cmd = [
+        "python", "-m", "learning.city_builder.train_rl",
+        f"--config-name={config_name}",
+        f"+run_name={run_name}",
+        f"experiment.seed={seed}",
+        f"experiment.logdir={tb_logdir}",
+        f"+outdir={weights_dir}",
+    ]
+    print("[modal_runs] launching:", " ".join(shlex.quote(c) for c in cmd))
+    proc = subprocess.run(
+        cmd, cwd="/workspace",
+        env={**os.environ, "PYTHONPATH": "/workspace"}, capture_output=False)
+
+    # train_rl saves `citybuilder_{run_name}.pt` (process_standard_experiment_cfg
+    # prepends 'citybuilder_'). Suffix-glob fallback as in `train`.
+    ckpt_name = f"citybuilder_{run_name}.pt"
+    primary = weights_dir / ckpt_name
+    persisted = [str(primary)] if primary.exists() else []
+    if not persisted:
+        for root in (weights_dir, Path("/workspace/output"), Path("/workspace/outputs")):
+            if not root.exists():
+                continue
+            for src in root.rglob(f"*{run_name}.pt"):
+                dst = weights_dir / src.name
+                if src != dst:
+                    dst.write_bytes(src.read_bytes())
+                persisted.append(str(dst))
+    checkpoint_volume.commit()
+    wandb.finish()
+    return {"seed": seed, "run_name": run_name,
+            "status": "ok" if proc.returncode == 0 else f"exit_{proc.returncode}",
+            "checkpoints": persisted}
+
+
+# ---------------------------------------------------------------------------
 # Local entrypoints (CLI)
 # ---------------------------------------------------------------------------
+
+
+@app.local_entrypoint()
+def rl(
+    config_name: str = "ppo_citybuilder_mandl",
+    seed: int = 0,
+    wandb_project: str = "cs224r-city-builder",
+):
+    """TOP-12 Stage-0 smoke: one seed of dynamic-environment RL training.
+
+        modal run modal_runs/train_static_holliday.py::rl \\
+            --config-name=ppo_citybuilder_mandl --seed=0
+    """
+    print(train_rl.remote(config_name=config_name, seed=seed,
+                          wandb_project=wandb_project))
+
+
+@app.function(
+    image=image,
+    gpu=GPU_SPEC,
+    volumes={CHECKPOINT_MOUNT: checkpoint_volume},
+    timeout=60 * 20,
+)
+def eval_rl_remote(config_name: str = "ppo_citybuilder_mandl", seed: int = 0) -> dict:
+    """Greedy eval of a trained RL checkpoint vs baselines (prints the table)."""
+    sys.path.insert(0, "/workspace")
+    os.chdir("/workspace")
+    checkpoint_volume.reload()
+    run_name = f"{config_name}_seed{seed}"
+    weights = f"{CHECKPOINT_MOUNT}/weights/citybuilder_{run_name}.pt"
+    if not Path(weights).exists():
+        cands = list((Path(CHECKPOINT_MOUNT) / "weights").glob(f"*{run_name}.pt"))
+        weights = str(cands[0]) if cands else weights
+    cmd = ["python", "-m", "learning.city_builder.eval_rl",
+           f"--config-name={config_name}", f"+model.weights={weights}"]
+    print("[modal_runs] launching:", " ".join(shlex.quote(c) for c in cmd))
+    proc = subprocess.run(cmd, cwd="/workspace",
+                          env={**os.environ, "PYTHONPATH": "/workspace"},
+                          capture_output=False)
+    return {"status": "ok" if proc.returncode == 0 else f"exit_{proc.returncode}"}
+
+
+@app.local_entrypoint()
+def eval_policy(config_name: str = "ppo_citybuilder_mandl", seed: int = 0):
+    """Evaluate the trained RL policy greedily vs greedy/random baselines.
+
+        modal run modal_runs/train_static_holliday.py::eval_policy \\
+            --config-name=ppo_citybuilder_mandl --seed=0
+    """
+    print(eval_rl_remote.remote(config_name=config_name, seed=seed))
 
 
 @app.local_entrypoint()

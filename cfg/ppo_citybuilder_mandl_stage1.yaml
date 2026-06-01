@@ -1,0 +1,58 @@
+# TOP-12 Stage 1 — multi-episode-per-iteration RL training on Mandl.
+#
+# Same closed-loop trainer as ppo_citybuilder_mandl, but collects
+# n_episodes_per_iter episodes per PPO iteration and pools them into ONE update
+# -> lower-variance gradients + more samples/update than the batch=1 Stage 0
+# run. Reuses the validated single-instance dynamics (no batched-graph surgery).
+#
+# Run (GPU):
+#   modal run modal_runs/train_static_holliday.py::rl \
+#       --config-name=ppo_citybuilder_mandl_stage1 --seed=0
+#   modal run modal_runs/train_static_holliday.py::eval_policy \
+#       --config-name=ppo_citybuilder_mandl_stage1 --seed=0
+
+ppo:
+  n_iterations: 150
+  val_period: 10
+  n_epochs: 2
+  n_episodes_per_iter: 8   # episodes pooled into each PPO update (Stage 1)
+  minibatch_size: 64       # pooled states per accumulated optimizer step
+  horizon: 200
+  epsilon: 0.2
+  use_gae: true
+  gae_lambda: 0.95
+
+discount_rate: 0.95
+diff_reward: true
+baseline_lr: 0.0005
+entropy_weight: 0.01
+batch_size: 1
+reward_scale: 1.0
+lr: 0.0016134816080499328
+decay: 0.0008404361781997002
+optimizer: Adam
+
+city_builder:
+  alpha: 0.5
+  beta_gravity: 2.0
+  cap_multiplier: 3.0
+  sigma_eps: 0.0
+  horizon_years: 10
+
+eval:
+  csv: false
+  n_routes: 10
+  min_route_len: 2
+  max_route_len: 8
+  dataset:
+    type: mumford
+    path: datasets/mumford_dataset/Instances
+    city: Mandl
+
+experiment:
+  logdir: null
+
+defaults:
+  - experiment: standard
+  - model: bestsofar_feb2023
+  - _self_

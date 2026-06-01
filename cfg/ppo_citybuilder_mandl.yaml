@@ -1,0 +1,64 @@
+# TOP-12 Stage 0 — dynamic-environment RL training on Mandl (batch_size=1).
+#
+# Trains Holliday's GNN policy with PPO under the CLOSED induced-demand loop:
+# learning/city_builder/train_rl.py forks train_ppo and fires the land-use
+# dynamics (step_world) on each route completion. See
+# docs/M3_TOP-12_rl_training_design.md.
+#
+# Cost function = mine.yaml (variable weights / LC-100 style, via experiment:
+# standard) so the policy handles all cost-weight alphas; EVALUATE the trained
+# policy at a FIXED cost weight (e.g. 0.5) and the SAME n_routes_to_plan=T used
+# here, to compare against the greedy/random baselines (design doc sec 9).
+#
+# Run (GPU):
+#   MODAL_GPU=1 modal run modal_runs/<runner>::main --config-name=ppo_citybuilder_mandl
+# Local:
+#   python -m learning.city_builder.train_rl --config-name=ppo_citybuilder_mandl \
+#       +run_name=cb_mandl_seed0 experiment.seed=0
+
+ppo:
+  n_iterations: 750
+  val_period: 25
+  n_epochs: 4
+  minibatch_size: 32       # buffered STATES grouped per update (batch_from_list)
+  horizon: 200             # generous step cap; episode ends when T routes built
+  epsilon: 0.2
+  use_gae: true
+  gae_lambda: 0.95
+
+discount_rate: 0.95        # gamma; telescopes (gamma=1) to total welfare gain
+diff_reward: true
+baseline_lr: 0.0005
+entropy_weight: 0.01
+batch_size: 1
+reward_scale: 1.0
+# Holliday's optuna-tuned Mumford3 hyperparams (carried over, as in ppo_mandl).
+lr: 0.0016134816080499328
+decay: 0.0008404361781997002
+optimizer: Adam
+
+# Our induced-demand land-use dynamics (NOT Holliday's cost-weight alpha).
+city_builder:
+  alpha: 0.5               # induced-demand strength (M2 working value)
+  beta_gravity: 2.0        # gravity / Hansen distance-decay
+  cap_multiplier: 3.0      # per-zone activity cap = 3 * x_0
+  sigma_eps: 0.0           # deterministic dynamics for Stage 0 (add noise later)
+  horizon_years: 10        # T (== eval.n_routes below)
+
+eval:
+  csv: false
+  n_routes: 10             # T years -> T routes-to-plan (one route per year)
+  min_route_len: 2
+  max_route_len: 8
+  dataset:
+    type: mumford
+    path: datasets/mumford_dataset/Instances
+    city: Mandl
+
+experiment:
+  logdir: null
+
+defaults:
+  - experiment: standard   # -> cost_function: mine (variable weights, LC-100)
+  - model: bestsofar_feb2023
+  - _self_
