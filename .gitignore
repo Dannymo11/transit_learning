@@ -8,3 +8,5 @@ __pycache__/
 *.log
 *.pt
 mandl_*.csv
+results/
+data/
