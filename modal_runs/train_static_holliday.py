@@ -62,6 +62,11 @@ TORCH_INDEX = (
     else "https://download.pytorch.org/whl/cpu"
 )
 GPU_SPEC = "A10G" if USE_GPU else None  # None => CPU container
+# TOP-12 City-Builder RL (train_rl + its eval) GPU. Default A10G: Mandl is tiny
+# (15 nodes, batch=1), so the PPO loop is CPU/Python-bound and an A100 would sit
+# idle at ~3-4x the cost. Bump to A100 when we move to larger instances via
+# MODAL_RL_GPU=A100 (or "A100-80GB"); set MODAL_GPU=0 to force CPU for both.
+RL_GPU_SPEC = os.environ.get("MODAL_RL_GPU", "A10G") if USE_GPU else None
 
 image = (
     modal.Image.debian_slim(python_version="3.12")
@@ -258,7 +263,7 @@ def train(
 
 @app.function(
     image=image,
-    gpu=GPU_SPEC,  # GPU by default (RL training is the expensive job)
+    gpu=RL_GPU_SPEC,  # A100 by default (TOP-12 RL training is the expensive job)
     secrets=[wandb_secret],
     volumes={CHECKPOINT_MOUNT: checkpoint_volume},
     timeout=60 * 60 * 6,
@@ -268,26 +273,27 @@ def train_rl(
     seed: int = 0,
     wandb_project: str = "cs224r-city-builder",
     wandb_run_group: Optional[str] = None,
+    run_name: Optional[str] = None,
+    extra_overrides: Optional[list[str]] = None,
 ) -> dict:
     """Run learning/city_builder/train_rl.py (PPO under the closed induced-demand
-    loop) for one seed, with W&B logging + checkpoint persistence to the volume.
-    Mirrors `train`; the trainer saves `citybuilder_{run_name}.pt`."""
-    import wandb
+    loop) for one seed. The TRAINING SUBPROCESS owns the W&B run (it calls
+    wandb.init/log directly), so welfare curves land in W&B Charts natively
+    rather than as unsynced TensorBoard scalars. We pass the project/group via
+    env vars; the WANDB_API_KEY from the secret is already in os.environ.
+    The trainer saves `citybuilder_{run_name}.pt`.
 
+    `run_name` lets callers disambiguate checkpoints across a sweep (the
+    alpha-ablation encodes the induced-demand alpha into the name so the five
+    policies don't overwrite one another). `extra_overrides` are appended to the
+    hydra argv verbatim (e.g. ['city_builder.alpha=0.25'])."""
     sys.path.insert(0, "/workspace")
     os.chdir("/workspace")
-    run_name = f"{config_name}_seed{seed}"
+    run_name = run_name or f"{config_name}_seed{seed}"
     tb_logdir = Path(CHECKPOINT_MOUNT) / "tb_logs"
     tb_logdir.mkdir(parents=True, exist_ok=True)
     weights_dir = Path(CHECKPOINT_MOUNT) / "weights"
     weights_dir.mkdir(parents=True, exist_ok=True)
-
-    wandb.tensorboard.patch(root_logdir=str(tb_logdir), pytorch=True)
-    wandb.init(project=wandb_project, name=run_name,
-               group=wandb_run_group or f"{config_name}_rl",
-               config={"config_name": config_name, "seed": seed,
-                       "milestone": "M3-TOP-12"},
-               sync_tensorboard=True, reinit=True)
 
     cmd = [
         "python", "-m", "learning.city_builder.train_rl",
@@ -297,10 +303,15 @@ def train_rl(
         f"experiment.logdir={tb_logdir}",
         f"+outdir={weights_dir}",
     ]
+    if extra_overrides:
+        cmd.extend(extra_overrides)
     print("[modal_runs] launching:", " ".join(shlex.quote(c) for c in cmd))
     proc = subprocess.run(
         cmd, cwd="/workspace",
-        env={**os.environ, "PYTHONPATH": "/workspace"}, capture_output=False)
+        env={**os.environ, "PYTHONPATH": "/workspace",
+             "WANDB_PROJECT": wandb_project,
+             "WANDB_RUN_GROUP": wandb_run_group or f"{config_name}_rl"},
+        capture_output=False)
 
     # train_rl saves `citybuilder_{run_name}.pt` (process_standard_experiment_cfg
     # prepends 'citybuilder_'). Suffix-glob fallback as in `train`.
@@ -317,7 +328,6 @@ def train_rl(
                     dst.write_bytes(src.read_bytes())
                 persisted.append(str(dst))
     checkpoint_volume.commit()
-    wandb.finish()
     return {"seed": seed, "run_name": run_name,
             "status": "ok" if proc.returncode == 0 else f"exit_{proc.returncode}",
             "checkpoints": persisted}
@@ -376,6 +386,268 @@ def eval_policy(config_name: str = "ppo_citybuilder_mandl", seed: int = 0):
             --config-name=ppo_citybuilder_mandl --seed=0
     """
     print(eval_rl_remote.remote(config_name=config_name, seed=seed))
+
+
+# ---------------------------------------------------------------------------
+# TOP-12 alpha-ablation: RL-vs-greedy gap across induced-demand strengths
+# ---------------------------------------------------------------------------
+
+
+def _alpha_tag(alpha: float) -> str:
+    """Filename-safe alpha tag: 0.25 -> 'a0p25' (avoids dots in checkpoint
+    names / globs)."""
+    return "a" + str(alpha).replace(".", "p").replace("-", "m")
+
+
+@app.function(
+    image=image,
+    gpu=RL_GPU_SPEC,
+    volumes={CHECKPOINT_MOUNT: checkpoint_volume},
+    timeout=60 * 40,
+)
+def eval_rl_numbers(
+    config_name: str,
+    run_name: str,
+    alpha: float,
+    seed: int,
+    n_samples: int = 100,
+    extra_overrides: Optional[list[str]] = None,
+) -> dict:
+    """Eval one trained (alpha, seed) checkpoint and return the FULL results
+    dict (rl_best / rl_mean / rl_std / rl_greedy / baselines / gaps) by reading
+    the JSON that eval_rl writes under +eval_out. n_samples defaults to 100 to
+    match Holliday's LC-100 for the headline best-of-N figure."""
+    sys.path.insert(0, "/workspace")
+    os.chdir("/workspace")
+    checkpoint_volume.reload()
+
+    weights = f"{CHECKPOINT_MOUNT}/weights/citybuilder_{run_name}.pt"
+    if not Path(weights).exists():
+        cands = list((Path(CHECKPOINT_MOUNT) / "weights").glob(f"*{run_name}.pt"))
+        if cands:
+            weights = str(cands[0])
+        else:
+            return {"status": "missing_checkpoint", "run_name": run_name,
+                    "weights": weights, "result": None}
+
+    out_dir = Path(CHECKPOINT_MOUNT) / "ablation"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    eval_out = out_dir / f"{run_name}_eval.json"
+
+    cmd = [
+        "python", "-m", "learning.city_builder.eval_rl",
+        f"--config-name={config_name}",
+        f"+model.weights={weights}",
+        f"city_builder.alpha={alpha}",
+        f"experiment.seed={seed}",
+        f"+n_samples={n_samples}",
+        f"+eval_out={eval_out}",
+    ]
+    if extra_overrides:
+        cmd.extend(extra_overrides)
+    print("[modal_runs] launching:", " ".join(shlex.quote(c) for c in cmd))
+    proc = subprocess.run(cmd, cwd="/workspace",
+                          env={**os.environ, "PYTHONPATH": "/workspace"},
+                          capture_output=False)
+    checkpoint_volume.commit()
+
+    if proc.returncode != 0 or not eval_out.exists():
+        return {"status": f"eval_failed_exit_{proc.returncode}",
+                "run_name": run_name, "result": None}
+    import json
+    return {"status": "ok", "run_name": run_name,
+            "result": json.loads(eval_out.read_text())}
+
+
+ABLATION_VOLUME_JSON = "ablation/rl_alpha_ablation.json"
+
+
+def ablation_json_path(tag: str = "") -> str:
+    """Per-experiment result JSON path on the volume; tag keeps sweeps from
+    overwriting each other's results."""
+    return f"ablation/rl_alpha_ablation_{tag}.json" if tag else ABLATION_VOLUME_JSON
+
+
+@app.function(
+    image=image,
+    volumes={CHECKPOINT_MOUNT: checkpoint_volume},
+    timeout=60 * 60 * 12,
+)
+def rl_alpha_ablation_remote(
+    config_name: str,
+    alpha_list: list[float],
+    seed_list: list[int],
+    n_samples: int,
+    base_over: list[str],
+    skip_train: bool,
+    tag: str = "",
+) -> dict:
+    """SERVER-SIDE orchestrator: fan out train + eval over the alpha x seed grid,
+    pool the rows, and write the pooled JSON to the volume at
+    `{CHECKPOINT_MOUNT}/{ABLATION_VOLUME_JSON}`.
+
+    Running the fan-out on Modal (rather than in the local entrypoint) is what
+    lets the whole sweep survive a client disconnect: launch the entrypoint with
+    `modal run --detach` and you can close your laptop -- this function, and the
+    train/eval jobs it spawns, keep going on Modal and the result lands on the
+    volume. nested .spawn()/.get() across app functions is supported."""
+    import json
+
+    # `tag` makes this whole sweep (W&B group, run names, checkpoint .pt files)
+    # unique so it can't collide with or overwrite earlier ablations.
+    suffix = f"_{tag}" if tag else ""
+    group = f"{config_name}{suffix}_alpha_ablation"
+
+    def run_name_of(a: float, s: int) -> str:
+        return f"{config_name}{suffix}_{_alpha_tag(a)}_seed{s}"
+
+    # 1) Fan out training (one A10G job per alpha x seed) ------------------
+    if not skip_train:
+        train_handles = {}
+        for a in alpha_list:
+            for s in seed_list:
+                rn = run_name_of(a, s)
+                ov = base_over + [f"city_builder.alpha={a}"]
+                train_handles[(a, s)] = train_rl.spawn(
+                    config_name=config_name, seed=s, wandb_run_group=group,
+                    run_name=rn, extra_overrides=ov)
+        for (a, s), h in train_handles.items():
+            r = h.get()
+            print(f"[train] alpha={a} seed={s}: {r['status']} -> {r['checkpoints']}")
+
+    # 2) Fan out eval (best-of-n_samples) ---------------------------------
+    eval_handles = {}
+    for a in alpha_list:
+        for s in seed_list:
+            # Forward the same overrides to EVAL so env-shaping knobs (e.g.
+            # city_builder.cap_mode / add_rate) match what training used --
+            # otherwise the greedy/random baselines and RL replay would be
+            # scored under different induced-demand dynamics than RL trained on.
+            # (alpha/seed are passed explicitly, so base_over must not include
+            # them -- it doesn't; the per-alpha override is added only to train.)
+            eval_handles[(a, s)] = eval_rl_numbers.spawn(
+                config_name=config_name, run_name=run_name_of(a, s),
+                alpha=a, seed=s, n_samples=n_samples,
+                extra_overrides=base_over)
+
+    rows = []
+    for (a, s), h in eval_handles.items():
+        res = h.get()
+        status = res.get("status")
+        if status == "ok" and res.get("result"):
+            rec = res["result"]
+            rows.append(rec)
+            print(f"[eval]  alpha={a} seed={s}: best={rec['rl_best']:.4f} "
+                  f"mean={rec['rl_mean']:.4f}±{rec['rl_std']:.4f} "
+                  f"greedy_base={rec['base_greedy']:.4f} "
+                  f"gap_best={rec['gap_best']:+.4f}")
+        else:
+            print(f"[eval]  alpha={a} seed={s}: {status} (skipped)")
+
+    payload = {
+        "config": {
+            "config_name": config_name, "alphas": alpha_list,
+            "seeds": seed_list, "n_samples": n_samples,
+            "train_overrides": base_over,
+            "cost_weight": 0.5, "baseline": "greedy(john_init) / random",
+        },
+        "results": rows,
+    }
+    out_file = Path(CHECKPOINT_MOUNT) / ablation_json_path(tag)
+    out_file.parent.mkdir(parents=True, exist_ok=True)
+    out_file.write_text(json.dumps(payload, indent=2))
+    checkpoint_volume.commit()
+    print(f"\nWrote {out_file}  ({len(rows)} (alpha,seed) rows) to the volume.")
+    return payload
+
+
+@app.local_entrypoint()
+def rl_alpha_ablation(
+    config_name: str = "ppo_citybuilder_mandl",
+    alphas: str = "0,0.25,0.5,1.0,2.0",
+    seeds: str = "0,1,2",
+    n_samples: int = 100,
+    out: str = "results/rl_alpha_ablation.json",
+    train_overrides: str = "",
+    skip_train: bool = False,
+    wait: bool = False,
+    tag: str = "featnormfix0602",
+):
+    """Train one PPO policy per (induced-demand alpha, seed) and eval each vs the
+    greedy/random baselines, pooling the RL-vs-greedy gap into one JSON for
+    plot_rl_alpha_ablation.py. The actual fan-out runs server-side in
+    rl_alpha_ablation_remote so it can outlive your laptop.
+
+    Two modes:
+
+      * DETACHED (close your computer) -- spawn the orchestrator and exit; the
+        sweep keeps running on Modal and the JSON lands on the volume::
+
+            modal run --detach modal_runs/train_static_holliday.py::rl_alpha_ablation
+
+        Then, once it's done, pull the result down and plot::
+
+            modal volume get transit-rl-checkpoints \\
+                ablation/rl_alpha_ablation.json results/rl_alpha_ablation.json
+            python -m learning.city_builder.plot_rl_alpha_ablation \\
+                --in results/rl_alpha_ablation.json
+
+      * BLOCKING (--wait) -- stay attached, wait for completion, and auto-download
+        the JSON to `out` locally::
+
+            modal run modal_runs/train_static_holliday.py::rl_alpha_ablation --wait
+
+    Other examples::
+
+        # Quick smoke: 3 alphas x 1 seed, fewer iters, best-of-20 (detached)
+        modal run --detach modal_runs/train_static_holliday.py::rl_alpha_ablation \\
+            --alphas=0,0.5,2.0 --seeds=0 --n-samples=20 \\
+            --train-overrides="ppo.n_iterations=40"
+
+        # Re-eval existing checkpoints without retraining
+        modal run --detach modal_runs/train_static_holliday.py::rl_alpha_ablation \\
+            --skip-train
+    """
+    import json
+
+    alpha_list = [float(a.strip()) for a in alphas.split(",") if a.strip()]
+    seed_list = [int(s.strip()) for s in seeds.split(",") if s.strip()]
+    base_over = shlex.split(train_overrides) if train_overrides else []
+    # `tag` namespaces this sweep's W&B group, run names, checkpoints, and the
+    # result JSON so nothing collides with previous ablations. Mirror it into
+    # the local output path unless the caller set a custom --out.
+    volume_json = ablation_json_path(tag)
+    if tag and out == "results/rl_alpha_ablation.json":
+        out = f"results/rl_alpha_ablation_{tag}.json"
+
+    if not wait:
+        # Detached path: spawn and return immediately. Pair with `modal run
+        # --detach` so the app (and this orchestrator) survive the client exit.
+        h = rl_alpha_ablation_remote.spawn(
+            config_name, alpha_list, seed_list, n_samples, base_over, skip_train,
+            tag)
+        print(f"submitted orchestrator: call id {h.object_id}")
+        print(f"experiment tag: {tag or '(none)'}")
+        print("Safe to close your laptop (you launched with `modal run --detach`).")
+        print("When it finishes, pull the result and plot:")
+        print(f"  modal volume get transit-rl-checkpoints "
+              f"{volume_json} {out}")
+        print("  python -m learning.city_builder.plot_rl_alpha_ablation "
+              f"--in {out}")
+        return
+
+    # Blocking path: run remotely, wait, and download the JSON locally.
+    payload = rl_alpha_ablation_remote.remote(
+        config_name, alpha_list, seed_list, n_samples, base_over, skip_train,
+        tag)
+    out_path = Path(out)
+    if not out_path.is_absolute():
+        out_path = REPO_ROOT / out_path
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(json.dumps(payload, indent=2))
+    print(f"\nWrote {out_path}  ({len(payload['results'])} (alpha,seed) rows)")
+    print("Now plot:  python -m learning.city_builder.plot_rl_alpha_ablation "
+          f"--in {out}")
 
 
 @app.local_entrypoint()
