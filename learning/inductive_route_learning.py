@@ -102,18 +102,32 @@ class RollingBaseline:
 
 
 class NNBaseline:
-    def __init__(self, learning_rate=0.0005, decay=0.01):
+    def __init__(self, learning_rate=0.0005, decay=0.01, grad_clip=None,
+                 loss="mse", input_clamp=None):
         self.learning_rate = learning_rate
         self.decay = decay
         self.optim = None
         self.model = None
         self._curr_estimate = None
-        self.loss_fn = torch.nn.MSELoss()
-        self.model = torch.nn.Sequential(
-            FeatureNorm(self.input_dim, 0.001),
-            get_mlp(3, self.input_dim*2, in_dim=self.input_dim, out_dim=1, 
-                    dropout=0.0)
-        ).to(DEVICE)
+        # Critic stabilization under non-stationary induced demand:
+        #  - input_clamp: bound the FeatureNorm output (e.g. +/-5) so when the
+        #    running normalizer lags the shifting demand inputs, the MLP never
+        #    sees extreme values and cannot emit +/-1000 (the baseline blow-ups).
+        #    This is the direct cause of the spikes (a FORWARD-magnitude issue);
+        #    analog of the policy GNN's nodepair-score clamp.
+        #  - grad_clip + Huber loss: bound the value-net's gradient/loss so an
+        #    outlier episode can't push the weights around (hygiene).
+        # All default to original behavior (None / 'mse') for other callers.
+        self.grad_clip = grad_clip
+        self.loss_fn = (torch.nn.SmoothL1Loss(beta=1.0) if loss == "huber"
+                        else torch.nn.MSELoss())
+        layers = [FeatureNorm(self.input_dim, 0.001)]
+        if input_clamp is not None:                 # bound normalized inputs
+            layers.append(torch.nn.Hardtanh(-float(input_clamp), float(input_clamp)))
+        layers.append(get_mlp(3, self.input_dim * 2, in_dim=self.input_dim,
+                              out_dim=1, dropout=0.0))
+        # NOTE: model[0] stays FeatureNorm so update()'s self.model[0].update() holds.
+        self.model = torch.nn.Sequential(*layers).to(DEVICE)
         self.optim = torch.optim.Adam(self.model.parameters(),
                                         lr=self.learning_rate, 
                                         weight_decay=self.decay)
@@ -132,6 +146,9 @@ class NNBaseline:
         costs = costs.to(self._curr_estimate.dtype)
         loss = self.loss_fn(self._curr_estimate, costs)
         loss.backward()
+        if self.grad_clip is not None:
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(),
+                                           self.grad_clip)
         self.optim.step()
         self._curr_estimate = None
         # update the feature normalization statistics

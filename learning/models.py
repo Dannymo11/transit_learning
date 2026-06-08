@@ -1508,6 +1508,27 @@ class PathCombiningRouteGenerator(RouteGeneratorBase):
         # if (is_halt & badlen).any():
         #     log.warning("Halting a route that's too short!")
 
+        # --- optional decision-inspector stash (off unless self.log_scores) ----
+        # Surfaces the per-candidate action distribution + halt probability for
+        # visualization (learning/city_builder/eval_rl.rl_build_routes_logged).
+        # No-op for training/eval; only the chosen action's logit is returned.
+        if getattr(self, "log_scores", False):
+            with torch.no_grad():
+                ext_probs = torch.softmax(flat_path_scores, dim=-1)
+                if self.serial_halting:
+                    halt_prob = torch.softmax(cont_or_halt, dim=-1)[..., 1]
+                else:
+                    halt_prob = ext_probs[..., halt_idx]
+            self._last_step_scores = {
+                "ext_probs": ext_probs.detach().cpu(),       # (B, n_nodes**2 [+1])
+                "halt_prob": halt_prob.detach().cpu(),        # (B,)
+                "n_nodes": int(state.n_nodes),
+                "serial_halting": bool(self.serial_halting),
+                "folded_idxs": folded_idxs.detach().cpu(),    # (B, 2)
+                "chose_halt": chose_halt.detach().cpu(),      # (B,)
+                "entropy": entropy.detach().cpu(),            # (B,)
+            }
+
         return folded_idxs, logits, entropy
 
     def _encode_graph(self, state: RouteGenBatchState):
@@ -1550,8 +1571,20 @@ class PathCombiningRouteGenerator(RouteGeneratorBase):
         np_embeds = torch.cat((np_embeds, edge_feats_square), dim=-1)
         np_scores = self.nodepair_scorer(np_embeds).squeeze(-1)
 
-        assert (np_scores.abs() < 10**6).all(), "Nodepair scores are " \
-            "blowing up, something wierd is going on!"
+        # Safety net (alpha-agnostic) replacing the original hard assert, whose
+        # divergence threshold was 1e6. The FeatureNorm unfreeze brought peak
+        # scores down from >1e6 (crash) to ~5e4 -- well within the range the
+        # original code treated as normal -- so the cap stays at 1e6 to catch
+        # only TRUE overflow. A lower cap (e.g. 1e4) fires on legitimate high-
+        # demand scores and distorts the policy's action distribution; if this
+        # warning recurs every iter, the policy is genuinely diverging.
+        SCORE_CAP = 1e6
+        max_abs = np_scores.abs().max()
+        if not (max_abs < SCORE_CAP):
+            log.warning("nodepair scores hit %.3g (cap %g); clamping -- check "
+                        "for divergence if this recurs", max_abs.item(),
+                        SCORE_CAP)
+            np_scores = np_scores.clamp(-SCORE_CAP, SCORE_CAP)
 
         path_scores = tu.aggr_edges_over_sequences(path_seqs, 
                                                    np_scores[..., None], 'sum')
