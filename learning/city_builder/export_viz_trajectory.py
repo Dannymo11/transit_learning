@@ -118,11 +118,14 @@ def grow(network, data, cost_obj, x0, cap, alpha, horizon, seed):
 
 
 def build_payload(instance, instances_dir, routes, construction, alphas,
-                  horizon, seed, source_label, network=None):
+                  horizon, seed, source_label, network=None, steps=None,
+                  rollout_activity=None, rollout_alpha=None):
     """Assemble the viewer JSON. `routes` is a list of node-lists; `construction`
-    is the per-stop build log (true RL action order, or reveal order for greedy).
-    If `network` is None it is rebuilt from `routes`. Reused by both the CLI here
-    and eval_rl's one-command viz export, so the dynamics match the sweep."""
+    is the per-stop build log (true RL action order, or reveal order for greedy);
+    `steps` (optional) is the per-action policy-inspector log (candidate
+    distribution + chosen move + halt prob). If `network` is None it is rebuilt
+    from `routes`. Reused by both the CLI here and eval_rl's one-command viz
+    export, so the dynamics match the sweep."""
     data = _fresh_data(instances_dir, instance)
     cost_obj = MyCostModule(symmetric_routes=True)
     x0 = _initial_activity_from_od(data.demand)
@@ -136,6 +139,10 @@ def build_payload(instance, instances_dir, routes, construction, alphas,
 
     series = {str(a): grow(network, data, cost_obj, x0, cap, a, horizon, seed)
               for a in alphas}
+    rollout = None
+    if rollout_activity is not None:
+        rollout = {"alpha": rollout_alpha, "activity": rollout_activity,
+                   "n_years": len(rollout_activity) - 1}
     return {
         "meta": {
             "instance": instance, "n_nodes": int(x0.shape[0]),
@@ -148,6 +155,8 @@ def build_payload(instance, instances_dir, routes, construction, alphas,
         "street_edges": _street_edges(data, cost_obj),
         "routes": [[int(n) for n in r] for r in routes],
         "construction": construction,
+        "steps": steps if steps is not None else [],
+        "rollout": rollout,
         "cap": cap.detach().cpu().numpy().tolist(),
         "x0": x0.detach().cpu().numpy().tolist(),
         "series": series,
