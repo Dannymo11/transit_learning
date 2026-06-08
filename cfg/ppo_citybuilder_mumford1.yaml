@@ -1,0 +1,70 @@
+# TOP-12 — dynamic-environment RL training on Mumford1 (batch_size=1).
+#
+# The heavy step up (70 nodes, 15-route benchmark, route len 10..30): maximum
+# coverage headroom for induced demand to act over the horizon, but much costlier
+# GNN rollouts/training than Mumford0 (A100 likely warranted: MODAL_RL_GPU=A100).
+# Same closed loop + integrated reward; only instance/geometry/horizon differ.
+#
+# Run (GPU):
+#   MODAL_RL_GPU=A100 modal run --detach \
+#       modal_runs/train_static_holliday.py::rl_alpha_ablation \
+#       --config-name=ppo_citybuilder_mumford1
+
+ppo:
+  n_iterations: 300       # runs converge well before 750 then drift/plateau;
+                          # 300 buffers above the peak (best-model select keeps
+                          # the peak). ~2.5x faster.
+  val_period: 25
+  n_epochs: 2             # was 4; halve update-phase GNN passes (FeatureNorm
+                          # unfreeze is the real stabilizer).
+  minibatch_size: 32
+  horizon: 800             # step cap; long routes (up to 30) => long episodes
+  epsilon: 0.2
+  use_gae: true
+  gae_lambda: 0.95
+  # Pool episodes per update to cut gradient variance (was unset -> 1, which
+  # drove divergence). 2 is enough now that the FeatureNorm unfreeze is the
+  # real stabilizer; halves rollout cost vs 4.
+  n_episodes_per_iter: 2
+
+discount_rate: 0.95
+diff_reward: true
+baseline_lr: 0.0005
+entropy_weight: 0.01
+batch_size: 1
+# Scale RL rewards/returns/value targets off the ~100 cost magnitude so the
+# NNBaseline critic and GAE deltas stay well-conditioned. Does NOT affect the
+# logged welfare_gain/integrated_welfare metrics (computed from raw costs).
+reward_scale: 0.01
+# lr was Optuna-tuned on Mandl (small instance, small costs); too hot for
+# Mumford1's larger rewards/gradients -> divergence. Lowered to 3e-4.
+lr: 0.0003
+decay: 0.0008404361781997002
+optimizer: Adam
+
+# Our induced-demand land-use dynamics (NOT Holliday's cost-weight alpha).
+city_builder:
+  alpha: 0.5               # induced-demand strength (swept by the ablation)
+  beta_gravity: 2.0
+  cap_multiplier: 3.0
+  sigma_eps: 0.0
+  horizon_years: 15        # build out the full Mumford1 network (configurable)
+  reward_mode: integrated
+
+eval:
+  csv: false
+  n_routes: 15             # Mumford1 benchmark route count (geometry metadata)
+  min_route_len: 10        # Mumford1 benchmark route-length bounds
+  max_route_len: 30
+  dataset:
+    type: mumford
+    path: datasets/mumford_dataset/Instances
+    city: Mumford1
+
+experiment:
+  logdir: null
+
+defaults:
+  - experiment: standard
+  - model: bestsofar_feb2023
+  - _self_

@@ -44,6 +44,11 @@ city_builder:
   cap_multiplier: 3.0      # per-zone activity cap = 3 * x_0
   sigma_eps: 0.0           # deterministic dynamics for Stage 0 (add noise later)
   horizon_years: 10        # T (== eval.n_routes below)
+  # RL reward functional. "integrated" = -sum_y C(s_y) (M2-style, demand-scaling,
+  # alpha-SENSITIVE) paid at each year boundary; "delta" = telescoped
+  # C(s_0)-C(s_T) (the original, nearly alpha-insensitive). See train_rl
+  # _collect_episode. Override per-run with city_builder.reward_mode=delta.
+  reward_mode: integrated
 
 eval:
   csv: false
