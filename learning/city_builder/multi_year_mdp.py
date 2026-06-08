@@ -63,6 +63,30 @@ Action = Optional[list]
 Policy = Callable[["CityBuilderEnv"], Action]
 
 
+# --- route-geometry-aware helpers (instance-parameterized) --------------
+# These replace alpha_sweep's Mandl-globals versions so the env works on any
+# instance (Mumford0/1/...) just by passing its min/max route length.
+def _street_state(data, cost_obj, min_len: int, max_len: int) -> RouteGenBatchState:
+    """Minimal state used only to read the street adjacency / build baselines."""
+    return RouteGenBatchState(
+        data, cost_obj, n_routes_to_plan=1,
+        min_route_len=min_len, max_route_len=max_len)
+
+
+def _transit_times(data, cost_obj, net, min_len: int, max_len: int) -> torch.Tensor:
+    """OD transit-time matrix (N, N) experienced ON `net` -- the closed-loop
+    accessibility basis. Parameterized copy of alpha_sweep.transit_drive_times;
+    n_routes_to_plan is sized to the network so larger instances don't overflow
+    the cost module's stop bookkeeping."""
+    n_routes = max(int(net.shape[1]), 1)
+    state = RouteGenBatchState(
+        data, cost_obj, n_routes_to_plan=n_routes,
+        min_route_len=min_len, max_route_len=max_len)
+    state.add_new_routes(net)
+    tt = state.transit_times
+    return tt[0] if tt.dim() == 3 else tt
+
+
 @dataclass
 class CityBuilderState:
     """Observable multi-year state. The heavy tensors live on the env; this is
@@ -86,15 +110,35 @@ class CityBuilderEnv:
                  alpha: float = M2_WORKING_ALPHA, horizon: int = HORIZON,
                  sigma_eps: float = 0.0, seed: int = 0,
                  b_annual: float = float("inf"),
-                 initial_routes: Optional[list] = None):
+                 initial_routes: Optional[list] = None,
+                 min_route_len: int = MIN_ROUTE_LEN,
+                 max_route_len: int = MAX_ROUTE_LEN,
+                 cap_mode: str = "proportional",
+                 add_rate: float = 0.0,
+                 cap_blend: Optional[float] = None,
+                 build_years: Optional[int] = None):
         self.instance = instance
         self.instances_dir = instances_dir
         self.alpha = alpha
         self.horizon = horizon
+        # Build-then-watch: routes may only be added in years [0, build_years).
+        # After that the network FREEZES while dynamics + cost keep advancing to
+        # `horizon`. Default = horizon => rebuild-every-year (original behavior).
+        self.build_years = int(build_years) if build_years is not None else int(horizon)
         self.sigma_eps = sigma_eps
         self.seed = seed
+        # Induced-demand dynamics shaping; defaults reproduce the original
+        # multiplicative, x_0-proportional-cap behavior. See LandUseConfig.
+        self.cap_mode = cap_mode
+        self.add_rate = add_rate
+        self.cap_blend = cap_blend
         self.b_annual = b_annual            # budget hook; inf => unconstrained
         self.initial_routes = initial_routes or []
+        # Per-instance route geometry (Mandl 2..8; Mumford0 2..15; Mumford1
+        # 10..30). Defaults preserve the Mandl benchmark so existing callers and
+        # the M2 sweep are unchanged.
+        self.min_route_len = int(min_route_len)
+        self.max_route_len = int(max_route_len)
         self.cost_obj = MyCostModule(symmetric_routes=True)
         self.reset()
 
@@ -102,7 +146,6 @@ class CityBuilderEnv:
     def reset(self) -> CityBuilderState:
         self.data = _fresh_data(self.instances_dir, self.instance)
         self.x_0 = _initial_activity_from_od(self.data.demand)
-        self.cap = CAP_MULTIPLIER * self.x_0
         # t=0 demand = gravity demand under x_0 (street-based; the closed loop
         # only changes the ACCESSIBILITY basis, not the gravity demand).
         recompute_demand_in_place(self.data, self.x_0, beta=BETA_GRAVITY)
@@ -112,9 +155,15 @@ class CityBuilderEnv:
             config=LandUseConfig(alpha=self.alpha, base_rate=1.0,
                                  sigma_eps=self.sigma_eps,
                                  cap_multiplier=CAP_MULTIPLIER,
+                                 cap_mode=self.cap_mode,
+                                 add_rate=self.add_rate,
+                                 cap_blend=self.cap_blend,
                                  beta_accessibility=BETA_GRAVITY),
             seed=self.seed,
         )
+        # Mirror the dynamics' actual per-zone cap so frac_at_cap reporting is
+        # correct under cap_mode='uniform' too.
+        self.cap = self.dyn.cap
         self.x = self.x_0.clone()
         self.year = 0
         self.built_routes = [list(r) for r in self.initial_routes]
@@ -127,14 +176,18 @@ class CityBuilderEnv:
         if self.year >= self.horizon:
             raise RuntimeError("episode is done; call reset()")
 
-        # 1. apply action a_t -> G_{t+1}
-        if action is not None and len(action) >= MIN_ROUTE_LEN:
+        # 1. apply action a_t -> G_{t+1}, but ONLY during the build window.
+        # In the watch phase (year >= build_years) the network is frozen: actions
+        # are ignored while dynamics + cost keep advancing below.
+        in_build_window = self.year < self.build_years
+        if in_build_window and action is not None and len(action) >= self.min_route_len:
             self.built_routes.append([int(n) for n in action])
         # (budget hook: in M4, debit capex(action) from self.b_remaining here)
 
         # 2. transition: dynamics observed against G_{t+1} (closed loop).
         net = self._materialize_network()
-        acc_dt = (transit_drive_times(self.data, self.cost_obj, net)
+        acc_dt = (_transit_times(self.data, self.cost_obj, net,
+                                 self.min_route_len, self.max_route_len)
                   if net is not None else self.data.drive_times)
         self.x, _, _ = step_world(self.dyn, self.data, self.x,
                                   accessibility_drive_times=acc_dt)
@@ -153,6 +206,7 @@ class CityBuilderEnv:
             "sum_activity": float(self.x.sum().item()),
             "frac_at_cap": float((self.x >= self.cap - 1e-6).float().mean().item()),
             "n_routes_built": len(self.built_routes),
+            "in_build_window": in_build_window,
         }
         return self._state(), float(reward), done, info
 
@@ -162,7 +216,7 @@ class CityBuilderEnv:
         if not self.built_routes:
             return None
         return get_batch_tensor_from_routes(
-            [self.built_routes], max_route_len=MAX_ROUTE_LEN)
+            [self.built_routes], max_route_len=self.max_route_len)
 
     def _welfare_cost(self) -> float:
         """C(s) = MyCostModule cost of the current network under current demand.
@@ -174,7 +228,7 @@ class CityBuilderEnv:
         n_routes = max(len(self.built_routes), 1)
         state = RouteGenBatchState(
             self.data, self.cost_obj, n_routes_to_plan=n_routes,
-            min_route_len=MIN_ROUTE_LEN, max_route_len=MAX_ROUTE_LEN,
+            min_route_len=self.min_route_len, max_route_len=self.max_route_len,
         )
         if net is not None:
             state.add_new_routes(net)
@@ -213,7 +267,8 @@ def _unserved_demand(env: "CityBuilderEnv") -> torch.Tensor:
     data = env.data
     n = int(data.demand.shape[0])
     net = env._materialize_network()
-    transit = (transit_drive_times(data, env.cost_obj, net)
+    transit = (_transit_times(data, env.cost_obj, net,
+                              env.min_route_len, env.max_route_len)
                if net is not None else torch.full((n, n), float("inf")))
     with torch.no_grad():
         quality = torch.nan_to_num(data.drive_times / transit,
@@ -224,7 +279,8 @@ def _unserved_demand(env: "CityBuilderEnv") -> torch.Tensor:
 
 
 def _street_graph(env: "CityBuilderEnv"):
-    street_adj = _new_state(env.data, env.cost_obj).street_adj[0]
+    street_adj = _street_state(
+        env.data, env.cost_obj, env.min_route_len, env.max_route_len).street_adj[0]
     have = (street_adj > 0) & street_adj.isfinite()
     n = have.shape[0]
     g = nx.Graph()
@@ -236,18 +292,19 @@ def _street_graph(env: "CityBuilderEnv"):
 
 
 def _coverage_route(g, have: torch.Tensor, src: int, dst: int,
-                    node_unserved: torch.Tensor) -> Optional[list]:
+                    node_unserved: torch.Tensor,
+                    max_len: int, min_len: int) -> Optional[list]:
     """Shortest src->dst street path, then greedily extended (at either end) to
-    MAX_ROUTE_LEN by appending the reachable node with the most unserved demand.
-    This turns a 2-node corridor into a coverage route through high-demand zones."""
+    max_len by appending the reachable node with the most unserved demand. This
+    turns a 2-node corridor into a coverage route through high-demand zones."""
     try:
         path = nx.shortest_path(g, src, dst, weight="weight")
     except nx.NetworkXException:
         return None
-    if len(path) > MAX_ROUTE_LEN:
-        path = path[:MAX_ROUTE_LEN]
+    if len(path) > max_len:
+        path = path[:max_len]
     on = set(path)
-    while len(path) < MAX_ROUTE_LEN:
+    while len(path) < max_len:
         best, best_score, best_end = None, -1.0, None
         for end in (path[0], path[-1]):
             nbrs = torch.nonzero(have[end]).squeeze(-1).tolist()
@@ -264,7 +321,7 @@ def _coverage_route(g, have: torch.Tensor, src: int, dst: int,
         else:
             path.append(best)
         on.add(best)
-    return path if len(path) >= MIN_ROUTE_LEN else None
+    return path if len(path) >= min_len else None
 
 
 def greedy_policy(env: "CityBuilderEnv") -> Action:
@@ -293,7 +350,8 @@ def greedy_policy(env: "CityBuilderEnv") -> Action:
     seen, candidates = set(), []
     for flat in flat_idx:
         src, dst = divmod(int(flat), n)
-        route = _coverage_route(g, have, src, dst, node_unserved)
+        route = _coverage_route(g, have, src, dst, node_unserved,
+                                env.max_route_len, env.min_route_len)
         if route is None:
             continue
         key = tuple(sorted(route))
@@ -310,10 +368,11 @@ def greedy_policy(env: "CityBuilderEnv") -> Action:
     best_route, best_cost = None, base_cost
     for route in candidates:
         trial = env.built_routes + [route]
-        net = get_batch_tensor_from_routes([trial], max_route_len=MAX_ROUTE_LEN)
+        net = get_batch_tensor_from_routes([trial],
+                                           max_route_len=env.max_route_len)
         state = RouteGenBatchState(
             env.data, env.cost_obj, n_routes_to_plan=max(len(trial), 1),
-            min_route_len=MIN_ROUTE_LEN, max_route_len=MAX_ROUTE_LEN)
+            min_route_len=env.min_route_len, max_route_len=env.max_route_len)
         state.add_new_routes(net)
         with torch.no_grad():
             c = float(env.cost_obj(state).cost.item())
@@ -326,20 +385,21 @@ def make_random_policy(seed: int = 0) -> Policy:
     gen = torch.Generator().manual_seed(20_000 + seed)
 
     def _policy(env: "CityBuilderEnv") -> Action:
-        state = _new_state(env.data, env.cost_obj)
+        state = _street_state(env.data, env.cost_obj,
+                              env.min_route_len, env.max_route_len)
         street_adj = state.street_adj[0]
         have = (street_adj > 0) & street_adj.isfinite()
         n = have.shape[0]
         start = int(torch.randint(n, (1,), generator=gen).item())
         route = [start]
         on = torch.zeros(n, dtype=torch.bool); on[start] = True
-        while len(route) < MAX_ROUTE_LEN:
+        while len(route) < env.max_route_len:
             cand = torch.nonzero(have[route[-1]] & ~on).squeeze(-1)
             if cand.numel() == 0:
                 break
             nxt = int(cand[torch.randint(cand.numel(), (1,), generator=gen)].item())
             route.append(nxt); on[nxt] = True
-        return route if len(route) >= MIN_ROUTE_LEN else None
+        return route if len(route) >= env.min_route_len else None
 
     return _policy
 
@@ -356,7 +416,11 @@ def run_episode(env: CityBuilderEnv, policy: Policy, verbose: bool = True):
               f"{len(state.built_routes):3d}")
     done = False
     while not done:
-        action = policy(env)
+        # Build-then-watch: only consult the policy during the build window. In
+        # the watch phase the network is frozen, so skip the (expensive) baseline
+        # policy call and pass None. Keeps greedy/random honest to the same
+        # build-window constraint as RL (TOP-33) and avoids wasted computation.
+        action = policy(env) if env.year < env.build_years else None
         state, reward, done, info = env.step(action)
         records.append({"year": state.year, "reward": reward, **info})
         if verbose:

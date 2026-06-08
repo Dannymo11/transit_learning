@@ -61,7 +61,39 @@ class LandUseConfig:
     """Per-zone Gaussian noise stddev (absolute, in activity units)."""
 
     cap_multiplier: float = 3.0
-    """Per-zone activity cap as a multiple of x_0. cap_i = cap_multiplier * x_0,i."""
+    """Per-zone activity cap as a multiple of the cap basis (see cap_mode).
+    cap_i = cap_multiplier * basis_i."""
+
+    cap_mode: str = "proportional"
+    """How the per-zone activity ceiling is set (used only when cap_blend is None).
+      'proportional' (default): basis_i = x_0,i  -> cap_i = cap_multiplier * x_0,i.
+          The original rich-get-richer ceiling: a zone that started small can
+          never grow large, so connecting a peripheral zone yields little.
+      'uniform': basis_i = mean(x_0 over developable zones) for every zone with
+          x_0,i > 0 (empty zones stay pinned at 0, preserving "no developable
+          land"). Decouples the ceiling from current prominence so a newly
+          connected peripheral zone can grow into meaningful demand -- the
+          headroom anticipation needs to beat myopia."""
+
+    cap_blend: Optional[float] = None
+    """If set (in [0,1]), OVERRIDES cap_mode with a blended basis:
+        basis_i = lambda * x_0,i + (1 - lambda) * mean(x_0 over developable zones)
+    for developable zones (empty zones stay pinned at 0). lambda=1.0 == the
+    'proportional' extreme (downtown stays dominant, periphery starved);
+    lambda=0.0 == the 'uniform' extreme (all developable zones share one cap, city
+    flattens). Intermediate lambda (e.g. 0.5) keeps the core's ceiling higher than
+    the periphery's -- realistic heterogeneity -- while still giving peripheral
+    zones real room to grow. The knob to dial how much anticipation can win
+    without collapsing the city to a single demand level."""
+
+    add_rate: float = 0.0
+    """Additive, size-INDEPENDENT accessibility growth. The update gains a term
+    add_rate * alpha * A_tilde_i * ref, where ref = mean(x_0 over developable
+    zones). 0.0 (default) -> pure multiplicative growth (original). With
+    add_rate > 0, improving a low-activity zone's accessibility INJECTS demand
+    proportional to a fixed city-scale reference rather than to the zone's own
+    (small) current activity, so connecting underserved zones creates demand
+    greedy would not have anticipated."""
 
     beta_accessibility: float = 2.0
     """Distance-decay exponent inside Hansen accessibility (only used by the
@@ -69,6 +101,15 @@ class LandUseConfig:
     accessibility_fn passed to LandUseDynamics overrides this."""
 
     def assert_valid(self) -> None:
+        if self.cap_mode not in ("proportional", "uniform"):
+            raise ValueError(
+                f"cap_mode must be 'proportional' or 'uniform', got "
+                f"{self.cap_mode!r}")
+        if self.add_rate < 0:
+            raise ValueError(f"add_rate must be non-negative, got {self.add_rate}")
+        if self.cap_blend is not None and not (0.0 <= self.cap_blend <= 1.0):
+            raise ValueError(
+                f"cap_blend must be in [0,1] or None, got {self.cap_blend}")
         if self.alpha < 0:
             raise ValueError(f"alpha must be non-negative, got {self.alpha}")
         if self.base_rate < 0:
@@ -125,9 +166,31 @@ class LandUseDynamics:
 
         self.config = config
         self.initial_activity = initial_activity.detach().clone()
-        # cap_i = cap_multiplier * x_0,i. Zones initialized at 0 are pinned at
-        # 0 (cap = 0), which matches "this zone has no developable land".
-        self.cap = config.cap_multiplier * self.initial_activity
+        # Reference city scale = mean initial activity over DEVELOPABLE zones
+        # (x_0 > 0). Used by the 'uniform' cap and the additive growth term.
+        developable = self.initial_activity > 0
+        if developable.any():
+            self.add_ref = self.initial_activity[developable].mean()
+        else:
+            self.add_ref = torch.zeros((), device=initial_activity.device,
+                                       dtype=initial_activity.dtype)
+        # cap_i = cap_multiplier * basis_i. Zones with x_0 = 0 are pinned at 0
+        # ("no developable land") in every mode. For developable zones:
+        #   cap_blend=lambda (if set): basis = lambda*x_0 + (1-lambda)*add_ref
+        #   cap_mode='uniform':        basis = add_ref  (== cap_blend=0)
+        #   cap_mode='proportional':   basis = x_0      (== cap_blend=1, default)
+        zeros = torch.zeros_like(self.initial_activity)
+        if config.cap_blend is not None:
+            lam = float(config.cap_blend)
+            blended = lam * self.initial_activity + (1.0 - lam) * self.add_ref
+            basis = torch.where(developable, blended, zeros)
+        elif config.cap_mode == "uniform":
+            basis = torch.where(developable,
+                                self.add_ref.expand_as(self.initial_activity),
+                                zeros)
+        else:
+            basis = self.initial_activity
+        self.cap = config.cap_multiplier * basis
 
         # Per-episode RNG. We use a torch.Generator on the same device as the
         # activity vector so step() does not have to ship noise across devices.
@@ -170,6 +233,15 @@ class LandUseDynamics:
 
         growth = self.config.base_rate + self.config.alpha * a_tilde
         x_next = activity * growth
+
+        if self.config.add_rate > 0:
+            # Size-INDEPENDENT injection: improving a zone's accessibility adds
+            # demand scaled to the city reference (mean x_0), not to the zone's
+            # own current activity. This is what lets connecting an underserved
+            # zone grow it toward relevance instead of being drowned out by the
+            # multiplicative growth of already-busy zones.
+            x_next = x_next + (self.config.add_rate * self.config.alpha
+                               * a_tilde * self.add_ref)
 
         if self.config.sigma_eps > 0:
             noise = torch.randn(
