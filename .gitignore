@@ -1,12 +1,37 @@
+# --- Python / tooling caches ---
+__pycache__/
+.pytest_cache/
+pytest-cache-files-*/
+.venv/
+.DS_Store
+*.log
+
+# --- Mercurial leftovers from upstream ---
+.hgignore
+.hgtags
+
+# --- Heavy data / model artifacts (regenerated, not submitted) ---
 weights/
 datasets/
+data/
+*.pt
+mandl_*.csv
+
+# --- Run outputs (regenerated) ---
 outputs/
 output_routes/
 viz_outputs/
-__pycache__/
-.DS_Store
-*.log
-*.pt
-mandl_*.csv
-results/
-data/
+modal_runs/outputs/
+150_steady_results/
+
+# --- Excluded from submission (kept locally, not tracked) ---
+slurm_jobs/
+docs/
+
+# --- results/: ignore everything except the figures we ship ---
+results/*
+!results/city_growth.gif
+!results/city_growth.png
+!results/top10_alpha_sweep.json
+!results/top10_alpha_sweep_evolution.pdf
+!results/top10_alpha_sweep_gap.pdf

@@ -1,12 +1,57 @@
-# License
+# City Builder: Transit Network Design under Induced Demand
 
-This work is released as free software under the GNU Public License.  All constituent source code files are covered by this license.  See the file COPYING for the full legal details of the license.
+**CS 224R course project (Spring 2026).** This project asks whether a
+reinforcement-learning transit planner that *anticipates induced demand* beats a
+myopic greedy replanner when the city it serves grows in response to the network
+it builds.
 
-# Usage
+We wrap Andrew Holliday's GNN + PPO route-design agent in a multi-year
+**city-builder MDP**: each year the agent (re)builds a transit network, and the
+city's per-zone activity then evolves via a land-use update driven by the
+**transit accessibility** the network provides. Gravity demand is recomputed
+from the evolved activity, closing the loop between what the agent builds and the
+demand it will face next year. The induced-demand strength is a single knob
+`alpha`; at `alpha = 0` the loop is inert and the setting collapses back to
+Holliday's static-demand benchmark (our core sanity check).
 
-To use this software, first set up a python environment with its dependencies.
+The headline result comes from the **build-then-watch** regime: the agent commits
+a network up front and then watches the city grow around it (vs. replanning every
+year). 
 
-## Environment setup with uv (recommended)
+> **This repository is a fork of Andrew Holliday's `transit_learning`**
+> ([McGill Mobile Robotics Lab](https://www.cim.mcgill.ca/~mrl/projs/transit_learning/)),
+> released under the GNU GPL. The inner route-design
+> machinery — the GNN policy, the PPO training loop, the cost module, the
+> city-graph schema, and the Mandl/Mumford dataset loaders — is Holliday's work.
+> Our contribution is the outer multi-year MDP and the induced-demand dynamics
+> built on top of it (see "What this fork adds"). Please keep the GPL notice and
+> the citation below intact.
+
+## What this fork adds
+
+All new code for this project is isolated so it can be reviewed at a glance:
+
+| Path | What it is |
+| --- | --- |
+| `learning/city_builder/` | The entire project contribution: the multi-year MDP, land-use dynamics, RL training/eval under the closed loop, baselines, ablations, and visualization. |
+| `cfg/ppo_citybuilder_*.yaml` | Hydra configs for the city-builder PPO runs (Mandl, Mumford0/1, and the stage-1 batched variant). |
+| `simulation/citygraph_dataset.py` | Instance-parameterized city graphs (configurable route geometry / horizon) used by the city-builder env. |
+| `tests/test_land_use_dynamics.py` | Unit tests for the land-use update (`alpha = 0` identity, cap behavior, determinism). |
+| `modal_runs/` | Modal + Weights & Biases cloud-training entry points for the experiments. |
+
+Key modules inside `learning/city_builder/`:
+
+- `multi_year_mdp.py` — the outer year-by-year environment wrapping Holliday's route machinery.
+- `land_use_dynamics.py` — the per-zone activity update `x_{t+1} = clip(x_t * (base_rate + alpha * A_tilde) + eps, 0, cap)`.
+- `accessibility.py`, `gravity.py`, `demand_hook.py` — transit-accessibility computation and the closed demand loop.
+- `train_rl.py` / `eval_rl.py` — PPO training and apples-to-apples evaluation vs. the baselines.
+- `alpha_sweep.py` — the induced-demand sensitivity sweep + decision gate (baselines).
+- `plot_rl_alpha_ablation.py` — the RL-vs-greedy gap-vs-alpha figure (writeup anchor).
+- `viz_city_growth.py` / `export_viz_trajectory.py` — city-evolution renderer and trajectory export.
+
+## Setup
+
+### Environment (uv recommended)
 
 From the repository root:
 
@@ -16,100 +61,112 @@ source .venv/bin/activate
 uv pip install -r cc_requirements.txt
 ```
 
-If you need to recreate the virtual environment from scratch:
+An `environment.yml` is also provided for conda-compatible tools.
+
+All scripts are run as Python modules (`python -m package.module`) so sibling
+packages like `simulation/` and `world/` resolve on `sys.path`; running the files
+by path will fail with `ModuleNotFoundError`. Most scripts use
+[Hydra](https://hydra.cc/) (override config from the CLI) or `argparse` — pass
+`-h` / `--help` for usage.
+
+### Datasets
+
+We use the Mandl and Mumford instances, distributed as `CEC2013Supp.zip` from
+[Christine Mumford's website](https://users.cs.cf.ac.uk/C.L.Mumford/Research%20Topics/UTRP/Outline.html)
+(mirrored on the [Wayback Machine](https://web.archive.org/web/*/users.cs.cf.ac.uk/C.L.Mumford/Research%20Topics/UTRP/CEC2013Supp.zip)).
+Extract it so there is an `Instances/` subdirectory containing `MandlCoords.txt`,
+`MandlTravelTimes.txt`, `MandlDemand.txt`, and the analogous `Mumford0`–`Mumford3`
+triplets. Pass that directory to the city-builder scripts via `--instances-dir`
+(argparse scripts) or `eval.dataset.path=` (Hydra scripts).
+
+## Reproducing the City Builder results
+
+All commands are run from the repository root with the venv active. The scripts
+write to `results/` by default (the shipped figures there were produced this way).
+
+**1. Induced-demand sanity check + alpha sweep (baselines).** Confirms `alpha = 0`
+reproduces the static-demand setting and that a working `alpha` opens a
+greedy-vs-random welfare gap:
 
 ```bash
-uv venv --python 3.12 --clear .venv
-source .venv/bin/activate
-uv pip install -r cc_requirements.txt
+python -m learning.city_builder.alpha_sweep \
+    --instances-dir /path/to/Instances \
+    --out results/top10_alpha_sweep
 ```
 
-The `environment.yml` file is still available if you prefer using conda-compatible tools instead of `uv`.
-
-For all scripts, run with `-h` or `--help` for some information on usage and arguments.  Most scripts are configured using the hydra library [https://hydra.cc/], and so the standard hydra CLI allows you to modify their configuration with command-line arguments.
-
-All commands below assume you are in the repository root and invoke scripts as Python modules (`python -m package.module`) rather than as file paths (`python path/to/file.py`), so that sibling packages like `simulation/` and `world/` resolve on `sys.path`.  Running the scripts directly as files will fail with `ModuleNotFoundError: No module named 'simulation'`.
-
-## Training
-
-If you're not using the pre-trained model weights (information on how to get them in the "Model Weights" section), you'll need to train your own model.  To generate a training dataset, use the `simulation/citygraph_dataset.py` script:
+**2. Train the RL policy (GPU; Modal recommended).**
 
 ```bash
-python -m simulation.citygraph_dataset --min N --max N --n NUM_GRAPHS /path/to/output/dataset
+python -m learning.city_builder.train_rl \
+    --config-name=ppo_citybuilder_mandl \
+    +run_name=cb_mandl_seed0 experiment.seed=0
 ```
 
-Note that right now, there's a bug for running the algorithm on batches of graphs with different numbers of nodes, so you should pass the same value to `--min` and `--max` to make sure all graphs in the dataset have the same size.  The dataset will be output to the directory you specify.
+For cloud training + W&B logging across seeds, see `modal_runs/README.md`.
 
-To train a model, use the script `learning/inductive_route_learning.py`.  You will need to specify the path to your generated training dataset directory as follows:
+**3. Evaluate the trained policy vs. the baselines.** The policy's routes are
+replayed through the same welfare path used for the greedy/random baselines, so
+the numbers are directly comparable:
 
 ```bash
-python -m learning.inductive_route_learning dataset.kwargs.path=/path/to/your/dataset
+python -m learning.city_builder.eval_rl \
+    --config-name=ppo_citybuilder_mandl \
+    +model.weights=/path/to/citybuilder_..._seed0.pt
 ```
 
-By default, the model will be trained over a range of cost weights from 0 to 1.  To train just on an operator perspective setting, add the argument `experiment/cost_function=op`,
-or to train on a passenger perspective setting, add `experiment/cost_function=pp`.
-
-Training should take around 3-6 hours on a modern commercial GPU.
-
-You can optionally add the argument `+run_name=my_run_name` to name the training run, which will affect the name of the tensorboard logs (stored by default in a directory called `training_logs`) and the name of the output weight file.  If this is not provided, the current date and time will be used as the name of the run.  
-
-When training is complete, the trained weights will be stored in the directory `output` in a file named `inductive_[run-name].pt`.
- 
-## Evaluation
-
-We mainly evaluate our methods on the Mandl and Mumford datasets, which can be downloaded as a single archive (`CEC2013Supp.zip`) from [Christine Mumford's website](https://users.cs.cf.ac.uk/C.L.Mumford/Research%20Topics/UTRP/Outline.html).  Download the archive and extract it to a directory on your system; the loader expects an `Instances/` subdirectory containing files like `MandlCoords.txt`, `MandlTravelTimes.txt`, `MandlDemand.txt`, and analogous triplets for `Mumford0`–`Mumford3`.
-
-If the Cardiff URL above is unresponsive, the archive is mirrored on the [Internet Archive Wayback Machine](https://web.archive.org/web/*/users.cs.cf.ac.uk/C.L.Mumford/Research%20Topics/UTRP/CEC2013Supp.zip).  To download the raw bytes of a Wayback snapshot without the rendering wrapper, append `id_` to the timestamp, e.g.:
+**4. RL-vs-greedy alpha ablation (headline figure).** Consumes the per-(alpha,
+seed) JSON produced by the Modal ablation driver in `modal_runs/`:
 
 ```bash
-curl -L -o CEC2013Supp.zip \
-  "https://web.archive.org/web/20251216000000id_/https://users.cs.cf.ac.uk/C.L.Mumford/Research%20Topics/UTRP/CEC2013Supp.zip"
+python -m learning.city_builder.plot_rl_alpha_ablation \
+    --in results/rl_alpha_ablation.json --metric integrated
 ```
 
-Each script described in this section prints a line of comma-separated statistics about the best transit network it finds, with the header format:
-,cost,C_p (minutes),C_o (minutes),d_0,d_1,d_2,d_{un},# disconnected node pairs,# stops out of bounds,running time (seconds),number of iterations
+**5. Visualize city growth.** Renders per-year snapshots of zones + transit
+network and an animation:
 
-Each also saves the best transit network as a pickled torch tensor which can be read by other scripts, in a directory called `output_routes`.  The filename will contain the run name that can be provided to each script with `+run_name=my_run_name`.  If no run name is provided, the date and time when the script was launched will be used instead.
-
-To evaluate a model on a Mumford city, use the script `learning/eval_route_generator.py`.  You must provide a `.pt` file with model weights, the path to the `Instances` sub-directory of the mumford dataset, and the name of the city on which to evaluate (`mandl` or `mumford0` - `mumford3`), as follows:
 ```bash
-python -m learning.eval_route_generator \
-  +model.weights=path_to_weights.pt \
-  eval.dataset.path=/path/to/mumford/Instances \
-  +eval=mandl \
-  +run_name=my_mandl_lc100
+python -m learning.city_builder.viz_city_growth \
+    --alpha 0.5 --baseline greedy --seed 0 \
+    --out results/city_growth
 ```
 
-To run the evolutionary algorithm (EA) on a city using the network generated by the above LC-100 run, the signature is similar, but without model weights:
+The build-then-watch (commit-then-observe) regime that produces the headline
+result is selected through the city-builder configs; see `cfg/ppo_citybuilder_*.yaml`.
+
+### Tests
+
 ```bash
-python -m learning.bee_colony \
-  eval.dataset.path=/path/to/mumford/Instances \
-  +eval=mandl \
-  init.path=output_routes/nn_construction_my_mandl_lc100_routes.pkl
+pytest tests/test_land_use_dynamics.py
 ```
 
-And to run the neural evolutionary algorithm (NEA), use the same script but specify the `neural_bco_mumford` config file, and provide model weights and the path to the transit network from LC-100 to be used as the starting network:
+## Upstream base model (Holliday et al.)
+
+The original route-design agent still works as documented upstream. To generate a
+training dataset and train the base model:
+
 ```bash
-python -m learning.bee_colony --config-name neural_bco_mumford \
-  +model.weights=path_to_weights.pt \
-  eval.dataset.path=/path/to/mumford/Instances \
-  +eval=mandl \
-  init.path=output_routes/nn_construction_my_mandl_lc100_routes.pkl
+python -m simulation.citygraph_dataset --min N --max N --n NUM_GRAPHS /path/to/dataset
+python -m learning.inductive_route_learning dataset.kwargs.path=/path/to/dataset
 ```
 
-Note that "bee colony" is a holdover from an earlier stage in this research project, where we were using a "bee colony optimization" algorithm.
+Trained weights land in `output/` as `inductive_[run-name].pt`. To evaluate, run
+the evolutionary algorithm (EA), or run the neural evolutionary algorithm (NEA),
+use `learning.eval_route_generator` and `learning.bee_colony` (`bee_colony` is a
+historical name); see the script `--help` for the full argument set. Pretrained
+weights for the upstream experiments are available from the McGill MRL project
+pages ([ITSC 2023](https://www.cim.mcgill.ca/~mrl/projs/transit_learning/itsc_2023),
+[PPO 2025](https://www.cim.mcgill.ca/~mrl/projs/transit_learning/ppo_2025)).
 
-# Model weights
+## License
 
-Model weights used for the ITSC experiments can be downloaded from the following link:
-https://www.cim.mcgill.ca/~mrl/projs/transit_learning/itsc_2023
+Released as free software under the **GNU General Public License**. All
+constituent source files are covered by this license; see `COPYING` for the full
+text.
 
-Those used for the most up-to-date PPO experiments (forthcoming) can be downloaded from: 
-https://www.cim.mcgill.ca/~mrl/projs/transit_learning/ppo_2025
+## Citation
 
-# Citation
-
-If you make use of this code for academic work, please cite our associated conference paper, "Augmenting Transit Network Design Algorithms with Deep Learning":
+If you make use of this code, please cite Holliday & Dudek's associated paper:
 
 ```
 @inproceedings{holliday2024autonomous,
