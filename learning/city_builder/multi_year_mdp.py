@@ -1,4 +1,4 @@
-"""Multi-year MDP wrapper for City Builder (M2 doc sec 1-5).
+"""Multi-year MDP wrapper for City Builder (M2 / TOP-9).
 
 This is the OUTER environment the project's contribution lives in: a year-by-year
 sequential decision problem on top of Holliday's (inner) route machinery. Per the
@@ -22,7 +22,7 @@ Reward   r_t = W(s_{t+1}) - W(s_t),  W(s) = -MyCostModule(materialize(s)).cost
           (lower cost = higher welfare), so r_t = C(s_t) - C(s_{t+1}). gamma=0.95
           at training time telescopes (gamma=1) to total welfare gain.
 
-Transition (M2 doc sec 4): apply a_t to G_t -> G_{t+1}; observe LandUseDynamics
+Transition: apply a_t to G_t -> G_{t+1}; observe LandUseDynamics
           against G_{t+1} (closed loop: accessibility uses the TRANSIT OD times
           of G_{t+1}; gravity demand stays on street times); recompute demand.
 

@@ -2,13 +2,12 @@
 #
 # Trains Holliday's GNN policy with PPO under the CLOSED induced-demand loop:
 # learning/city_builder/train_rl.py forks train_ppo and fires the land-use
-# dynamics (step_world) on each route completion. See
-# docs/M3_TOP-12_rl_training_design.md.
+# dynamics (step_world) on each route completion.
 #
 # Cost function = mine.yaml (variable weights / LC-100 style, via experiment:
 # standard) so the policy handles all cost-weight alphas; EVALUATE the trained
 # policy at a FIXED cost weight (e.g. 0.5) and the SAME n_routes_to_plan=T used
-# here, to compare against the greedy/random baselines (design doc sec 9).
+# here, to compare against the greedy/random baselines.
 #
 # Run (GPU):
 #   MODAL_GPU=1 modal run modal_runs/<runner>::main --config-name=ppo_citybuilder_mandl

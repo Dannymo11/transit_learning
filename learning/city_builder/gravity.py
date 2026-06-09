@@ -2,8 +2,8 @@
 
 D_{ij} = x_i * x_j * d_{ij}^{-beta},  D_{ii} = 0
 
-This is the unconstrained-gravity placeholder committed to in
-docs/M2_mdp_formalization.md sec 9. Calibration against Bogota's Encuesta de
+This is the unconstrained-gravity placeholder for the project (M2 / TOP-9).
+Calibration against Bogota's Encuesta de
 Movilidad (M4 / TOP-15) may replace it with a singly- or doubly-constrained
 variant; the LandUseDynamics interface accepts any callable with the same
 signature so the swap is local.

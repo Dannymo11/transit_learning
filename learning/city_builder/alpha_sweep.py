@@ -28,7 +28,7 @@ Protocol (locked 2026-05-30):
 
 NOTE on naming: john_init's `alpha` argument is Holliday's time/demand tradeoff
 (== w_p in our writeup), NOT our induced-demand alpha. We pass it as `w_p` here
-to avoid the collision flagged in docs/M2_mdp_formalization.md.
+to avoid the alpha-naming collision.
 
 Run from the repo root::
 

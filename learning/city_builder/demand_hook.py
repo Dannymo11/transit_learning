@@ -57,7 +57,7 @@ def recompute_demand_in_place(
             post-action matrix that has not been written back to `data` yet).
         activity: shape (N,) per-zone activity.
         beta: distance-decay exponent for the default unconstrained-gravity
-            model. Defaults to 2.0 (MDP doc sec 9). 
+            model. Defaults to 2.0. 
         drive_times: optional override for `data.drive_times`.
         gravity_fn: optional callable replacing the default gravity model. Must
             return a non-negative (N, N) matrix; symmetry / zero-diagonal of
@@ -94,7 +94,7 @@ def recompute_demand_in_place(
     edge_attr = dmd_store.edge_attr
     # In-place column updates --- preserve any extra columns the upstream
     # synthetic dataset may have added (it currently uses just the two, but the
-    # MDP doc sec 6 leaves room to extend node/edge features for the multi-year
+    # schema leaves room to extend node/edge features for the multi-year
     # policy).
     edge_attr[:, DMD_FEAT_IDX] = new_dmd_feat
     edge_attr[:, SHORTESTPATH_FEAT_IDX] = new_dt_feat
@@ -152,7 +152,7 @@ def step_world(
             backward compatible with the static-reproduction tests.
         beta: gravity decay exponent. Defaults to
             ``dyn.config.beta_accessibility`` so accessibility and gravity stay
-            paired (per the MDP doc rationale).q
+            paired (so they share one decay exponent).
         gravity_fn: optional pluggable gravity model. Mirrors the
             ``accessibility_fn`` hook on ``LandUseDynamics``.
 
@@ -168,8 +168,8 @@ def step_world(
     if accessibility_drive_times is None:
         accessibility_drive_times = drive_times
     if beta is None:
-        # Keep accessibility-beta and gravity-beta paired by default (MDP doc
-        # sec 9 rationale: shared exponent is intentional, not a coincidence).
+        # Keep accessibility-beta and gravity-beta paired by default
+        # (shared exponent is intentional, not a coincidence).
         # Override `beta` (or supply `gravity_fn`) to decouple them.
         beta = dyn.config.beta_accessibility
 

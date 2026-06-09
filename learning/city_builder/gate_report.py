@@ -86,7 +86,7 @@ def report(city: str, by_alpha: dict[float, list[float]], files: list[str]) -> b
     print(f"GATE (alpha={GATE_ALPHA}): "
           f"{'PASS — within LC-100 seed variance' if overall_pass else 'FAIL — exceeds LC-100 + tolerance; fix before TOP-12'}")
     if overall_pass:
-        # warn if either extreme missed, per the doc (investigable, not blocking)
+        # warn if either extreme missed (investigable, not blocking)
         for a in (0.0, 1.0):
             costs = np.array(by_alpha.get(a, []), dtype=float)
             if costs.size and costs.mean() > paper[a][0] + max(paper[a][1], costs.std()):

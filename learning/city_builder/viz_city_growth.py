@@ -9,8 +9,8 @@ renders, per snapshot year, the spatial city state:
   * the transit network IN FORCE that year drawn as colored polylines --- i.e.
     the routes the agent has built so far.
 
-This is the foundation of the M5 city-evolution hero figure (project doc, M5
-Visualization note). For now `--baseline greedy` uses john_init as a stand-in
+This is the foundation of the M5 city-evolution hero figure. For now
+`--baseline greedy` uses john_init as a stand-in
 for the policy; once a trained policy exists, add a `policy` branch in
 `_network_for_year` that calls it and everything else (recording + rendering)
 is unchanged.

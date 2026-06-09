@@ -5,7 +5,7 @@ DESIGN NOTE
 -----------
 TOP-11 is the "calibration" milestone: train Holliday's policy under his
 *static* dynamics (alpha=0 in our framework, but actually no LandUseDynamics
-at all per M2 MDP doc sec 6 line 109) and confirm convergence matches the
+at all) and confirm convergence matches the
 published numbers. This runner intentionally does NOT import
 `learning.city_builder` --- TOP-12 is where that integration begins.
 

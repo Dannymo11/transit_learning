@@ -2,7 +2,6 @@
 
 The single most important invariant: alpha=0 + sigma_eps=0 -> identity.
 This is the gate for "did we break Holliday's static-demand reproduction?"
-(MDP doc sec 4; M1 architecture mapping sec "Critical seam properties").
 """
 from __future__ import annotations
 
@@ -156,7 +155,7 @@ def test_gravity_zero_diagonal(small_city):
 
 
 def test_alpha_zero_no_noise_is_identity(small_city):
-    """The decision gate from MDP doc sec 4: alpha=0, sigma=0 -> static demand.
+    """The decision gate: alpha=0, sigma=0 -> static demand.
 
     No other property of the module matters if this one fails."""
     activity, drive_times = small_city
@@ -364,8 +363,8 @@ def test_recompute_demand_warns_on_partial_index(small_city):
 # Caching-trap regression guards (from the demand-caching audit)
 #
 # These two tests do not exercise new behavior; they lock in invariants the
-# multi-year experiment silently depends on. See docs/M1_architecture_mapping.md
-# "Critical seam properties".
+# multi-year experiment silently depends on (the critical demand-caching
+# seam properties).
 # ---------------------------------------------------------------------------
 
 
@@ -654,8 +653,8 @@ def test_step_world_uses_gravity_fn_hook(fully_connected_data):
 
 def test_step_world_default_beta_pairs_with_accessibility(fully_connected_data):
     """When `beta` is not supplied, step_world uses dyn.config.beta_accessibility
-    so the accessibility and gravity exponents stay paired (MDP doc sec 9
-    rationale). Sanity: changing beta_accessibility changes the demand."""
+    so the accessibility and gravity exponents stay paired (shared exponent
+    by design). Sanity: changing beta_accessibility changes the demand."""
     data, activity, drive_times = fully_connected_data
 
     dyn_b2 = LandUseDynamics(

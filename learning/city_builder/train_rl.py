@@ -5,9 +5,9 @@ This is a focused fork of Holliday's `inductive_route_learning.train_ppo`: the
 PPO rollout + GAE + clipped update are reused as-is; the ONE addition is that
 after each transit route is completed, the city advances one year via
 `step_world` (closed loop: growth follows the network's transit accessibility,
-gravity demand stays on street times). See docs/M3_TOP-12_rl_training_design.md.
+gravity demand stays on street times).
 
-Mapping (design doc sec 3-4):
+Mapping:
   * each `model.step` + `state.shortest_path_action` is a route SEGMENT step;
   * a route completes on a halt action -> `state.n_finished_routes` increments;
   * a YEAR = one completed route; the land-use dynamics fire on completion;

@@ -1,8 +1,8 @@
 # CS 224R City Builder package.
 #
 # Contribution layer on top of Holliday's transit-RL repo (the "library" half
-# of the library-not-framework boundary documented in docs/M1_architecture_mapping.md
-# and docs/M2_mdp_formalization.md).
+# of the library-not-framework boundary: we reuse his cost module + city-graph
+# schema and add the outer multi-year MDP).
 #
 # v1 surface (M2 / TOP-9):
 #   - LandUseDynamics: per-zone activity update under induced demand
@@ -12,7 +12,6 @@
 #
 # alpha (induced-demand strength) is reserved for this module ONLY. Holliday's
 # cost-weight tradeoff is named w_p / demand_time_weight in our code and writeup.
-# See docs/M2_mdp_formalization.md notation note.
 
 from .accessibility import hansen_accessibility, normalize_accessibility
 from .gravity import gravity_demand

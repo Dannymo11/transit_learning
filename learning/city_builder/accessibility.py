@@ -4,8 +4,8 @@ For zone i under network with drive-time matrix d_{ij}:
 
     A_i = sum_{j != i} x_j * d_{ij}^{-beta}
 
-with beta = 2 by default (matches the gravity-model exponent in
-docs/M2_mdp_formalization.md sec 9). Disconnected pairs (d_{ij} = inf) contribute
+with beta = 2 by default (matches the gravity-model exponent). Disconnected
+pairs (d_{ij} = inf) contribute
 zero, which is the desired behavior. The diagonal is masked out so a zone does
 not "access itself" with d = 0.
 
@@ -36,7 +36,7 @@ def hansen_accessibility(
         drive_times: shape (N, N) zone-to-zone drive times. Inf entries
             (disconnected pairs) contribute zero. Diagonal is ignored.
         beta: decay exponent. Default 2.0 matches the placeholder gravity
-            model in MDP doc sec 9.
+            model exponent.
 
     Returns:
         Tensor of shape (N,), non-negative.

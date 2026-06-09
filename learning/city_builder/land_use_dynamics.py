@@ -1,6 +1,6 @@
 """LandUseDynamics --- per-zone activity update driven by accessibility.
 
-Implements the M2 / TOP-9 spec from docs/M2_mdp_formalization.md sec 4:
+Implements the induced-demand land-use update (M2 / TOP-9):
 
     x_{t+1,i} = clip(x_{t,i} * (base_rate + alpha * A_tilde_{t,i}) + eps_{t,i},
                      0, cap_i)
@@ -220,13 +220,13 @@ class LandUseDynamics:
         Args:
             activity: shape (N,), current x_t.
             drive_times: shape (N, N), zone-to-zone times under the post-action
-                network G_{t+1} (per MDP doc sec 4: action applied first, then
+                network G_{t+1} (action applied first, then
                 dynamics observed against the updated network).
 
         Returns:
             (activity_next, accessibility_tilde) where both have shape (N,).
             accessibility_tilde is returned for downstream consumption as a
-            per-node feature in the policy's observation (per MDP doc sec 6).
+            per-node feature in the policy's observation.
         """
         a_raw = self.accessibility_fn(activity, drive_times)
         a_tilde = normalize_accessibility(a_raw)
