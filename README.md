@@ -5,7 +5,7 @@ reinforcement-learning transit planner that *anticipates induced demand* beats a
 myopic greedy replanner when the city it serves grows in response to the network
 it builds.
 
-We wrap Andrew Holliday's GNN + PPO route-design agent in a multi-year
+I wrap Andrew Holliday's GNN + PPO route-design agent in a multi-year
 **city-builder MDP**: each year the agent (re)builds a transit network, and the
 city's per-zone activity then evolves via a land-use update driven by the
 **transit accessibility** the network provides. Gravity demand is recomputed
@@ -71,7 +71,7 @@ by path will fail with `ModuleNotFoundError`. Most scripts use
 
 ### Datasets
 
-We use the Mandl and Mumford instances, distributed as `CEC2013Supp.zip` from
+I use the Mandl and Mumford instances, distributed as `CEC2013Supp.zip` from
 [Christine Mumford's website](https://users.cs.cf.ac.uk/C.L.Mumford/Research%20Topics/UTRP/Outline.html)
 (mirrored on the [Wayback Machine](https://web.archive.org/web/*/users.cs.cf.ac.uk/C.L.Mumford/Research%20Topics/UTRP/CEC2013Supp.zip)).
 Extract it so there is an `Instances/` subdirectory containing `MandlCoords.txt`,
